@@ -1,6 +1,6 @@
 ---
 name: ssh-skill
-description: Use this skill for agent-accessible SSH operations through a CLI-first JSON interface, including SSH config aliases, direct username/password connections, explicit project credential profiles, non-interactive remote command execution, SFTP upload/download, connection tests, and daemon connection reuse.
+description: Use this skill for agent-accessible SSH operations through a CLI-first interface, including SSH config aliases, direct username/password connections, explicit project credential profiles, non-interactive remote command execution, interactive PTY commands and shells, SFTP upload/download, connection tests, and daemon connection reuse.
 ---
 
 # SSH Skill
@@ -28,7 +28,7 @@ bash <ssh-skill-dir>/scripts/run.sh <command> ...
 
 Do not `cd` into the skill directory just to run commands. The default project root for local state is the current working directory unless `--root` is passed.
 
-The CLI writes one JSON object to stdout for each final result. Transfer progress and diagnostics go to stderr.
+The CLI writes one JSON object to stdout for each final result except `interactive`. Transfer progress and diagnostics go to stderr. `interactive` streams the remote terminal directly and returns the remote exit code.
 
 ## JSON Contract
 
@@ -44,18 +44,18 @@ Failures include:
 - `error`
 - Optional `detail`
 
-Remote command failures are still valid CLI results: `exec` returns `success: false`, `exit_code`, `stdout`, `stderr`, and `method`.
+Remote command failures are still valid CLI results: `exec` returns `success: false`, `exit_code`, `stdout`, `stderr`, and `method`. `interactive` can write a small JSON summary to `--summary-file` when machine-readable status is needed.
 
 ## Target Resolution
 
 Connection values resolve in this order:
 
-1. Explicit command options: `--username`, `--password-stdin`/`--password`, and `--port`
+1. Explicit command options: `--username`, `--password`, and `--port`
 2. A same-name project credential profile
 3. A same-name `Host` alias from `~/.ssh/config`
 4. The target itself as a direct hostname/IP
 
-Use `--password-stdin` by default for password authentication. Avoid `--password` unless a direct manual invocation requires it, because process listings and shell history may expose it.
+Use `--password` for direct password authentication. Prefer saved profiles or SSH keys when practical because process listings and shell history may expose command-line passwords.
 
 Unknown host keys are trusted automatically. This favors automation over strict MITM protection.
 
@@ -66,6 +66,8 @@ bash <ssh-skill-dir>/scripts/run.sh list
 bash <ssh-skill-dir>/scripts/run.sh find <keyword>
 bash <ssh-skill-dir>/scripts/run.sh test <target> --timeout 30
 bash <ssh-skill-dir>/scripts/run.sh exec <target> -- "sh -lc 'whoami && hostname'"
+bash <ssh-skill-dir>/scripts/run.sh interactive <target> -- "sudo systemctl status nginx"
+bash <ssh-skill-dir>/scripts/run.sh interactive <target> --shell
 bash <ssh-skill-dir>/scripts/run.sh upload <target> ./local-file /remote/path/
 bash <ssh-skill-dir>/scripts/run.sh download <target> /remote/file ./local-file
 ```
@@ -75,17 +77,15 @@ Use `--recursive` for directory upload or download.
 Test a direct username/password connection without saving it:
 
 ```bash
-printf '%s\n' "$SSH_PASSWORD" |
-  bash <ssh-skill-dir>/scripts/run.sh \
-  test 203.0.113.10 --username root --password-stdin --timeout 30
+bash <ssh-skill-dir>/scripts/run.sh \
+  test 203.0.113.10 --username root --password "$SSH_PASSWORD" --timeout 30
 ```
 
 Save a successfully authenticated username/password profile only when the user explicitly asks to remember it:
 
 ```bash
-printf '%s\n' "$SSH_PASSWORD" |
-  bash <ssh-skill-dir>/scripts/run.sh \
-  test 203.0.113.10 --username root --password-stdin --save --save-as prod
+bash <ssh-skill-dir>/scripts/run.sh \
+  test 203.0.113.10 --username root --password "$SSH_PASSWORD" --save --save-as prod
 ```
 
 Explicit username/password execution bypasses the daemon. Saved profiles and SSH config aliases may use the daemon:
@@ -93,6 +93,32 @@ Explicit username/password execution bypasses the daemon. Saved profiles and SSH
 ```bash
 bash <ssh-skill-dir>/scripts/run.sh exec prod -- "hostname"
 ```
+
+Run a foreground interactive command when the remote program needs a PTY or live input:
+
+```bash
+bash <ssh-skill-dir>/scripts/run.sh interactive prod -- "sudo systemctl restart nginx"
+```
+
+Open the remote account's default shell explicitly:
+
+```bash
+bash <ssh-skill-dir>/scripts/run.sh interactive prod --shell
+```
+
+The `interactive` command:
+
+- Requires local stdin and stdout to be real TTYs.
+- Always opens a direct SSH connection; it does not use or start the daemon.
+- Sends local input to the remote PTY and streams remote terminal output directly.
+- Returns the remote exit code when available, or `255` if the SSH channel closes without one.
+- Supports `--username`, `--password`, `--port`, `--connect-timeout`, `--session-timeout`, `--term`, `--rows`, and `--cols`.
+- Does not support `--save` or `--save-as`; save profiles with `test --save`.
+- Accepts local options only before `--`; everything after `--` is the remote command.
+- Writes no final JSON to stdout. Use `--summary-file PATH` for a small JSON result file.
+- Records no transcript by default. Use `--log-file PATH` to write raw remote terminal output bytes. Existing logs are refused unless `--append-log` or `--overwrite-log` is passed.
+
+Summary and log paths are resolved under the selected project root. `--summary-file` refuses to overwrite an existing file unless `--overwrite-summary` is passed.
 
 List or remove saved project credentials:
 
@@ -141,7 +167,7 @@ These fields only help target discovery. They do not affect connection behavior.
 ## Boundaries
 
 - Use this CLI instead of raw `ssh`, `scp`, or `sftp` when the skill is available.
-- Keep remote execution non-interactive; do not rely on PTY, shell prompts, menus, or interactive sudo.
+- Use `interactive` for commands that require PTY, shell prompts, menus, or interactive sudo.
 - Before destructive remote changes, privilege changes, service restarts, data deletion, or broad writes, explain the exact command and expected impact, then get user confirmation.
 - Do not create, edit, delete, or manage SSH config entries from this skill.
 - Do not use this skill for SSH tunnels, key management, `rsync`, server-to-server copy, or batch host fan-out.

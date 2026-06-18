@@ -8,15 +8,19 @@ import importlib.util
 import json
 import os
 import posixpath
+import select
 import shlex
+import signal
 import socket
 import stat
 import struct
 import subprocess
 import sys
 import tempfile
+import termios
 import threading
 import time
+import tty
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -124,7 +128,6 @@ class ConnectionOptions:
             (
                 self.username is not None,
                 self.password is not None,
-                self.password_stdin,
                 self.port is not None,
             )
         )
@@ -509,22 +512,14 @@ def find_targets(keyword: str, *, config_path: Path, root: Path) -> list[dict[st
     return matches
 
 
-def read_password_from_stdin() -> str:
-    value = sys.stdin.readline()
-    if value == "":
-        raise SSHSkillError("--password-stdin requires a password on stdin")
-    password = value.rstrip("\r\n")
-    if not password:
-        raise SSHSkillError("--password-stdin requires a non-empty password")
-    return password
-
-
 def prepare_connection_options(options: ConnectionOptions) -> ConnectionOptions:
-    if options.password is not None and options.password_stdin:
-        raise SSHSkillError("--password and --password-stdin cannot be used together")
+    if options.password_stdin:
+        raise SSHSkillError(
+            "--password-stdin has been removed; use --password or a saved profile"
+        )
     if options.save_as is not None and not options.save:
         raise SSHSkillError("--save-as requires --save")
-    password = read_password_from_stdin() if options.password_stdin else options.password
+    password = options.password
     if password == "":
         raise SSHSkillError("--password requires a non-empty password")
     if options.port is not None:
@@ -1243,6 +1238,297 @@ def download_path(
         close_ssh_client(client)
 
 
+def format_timestamp() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%S%z")
+
+
+def validate_positive_int(value: int | None, option: str) -> int | None:
+    if value is None:
+        return None
+    if value <= 0:
+        raise SSHSkillError(f"{option} must be greater than zero")
+    return value
+
+
+def resolve_project_output_path(path: Path, *, root: Path, option: str) -> Path:
+    expanded = path.expanduser()
+    candidate = expanded if expanded.is_absolute() else root / expanded
+    resolved = candidate.resolve(strict=False)
+    resolved_root = root.resolve(strict=False)
+    try:
+        resolved.relative_to(resolved_root)
+    except ValueError as exc:
+        raise SSHSkillError(f"{option} must be inside the project root: {root}") from exc
+    return resolved
+
+
+def prepare_output_path(
+    path: Path | None,
+    *,
+    root: Path,
+    option: str,
+    overwrite: bool,
+    append: bool = False,
+) -> Path | None:
+    if path is None:
+        return None
+    if overwrite and append:
+        raise SSHSkillError(f"{option} cannot use overwrite and append together")
+    resolved = resolve_project_output_path(path, root=root, option=option)
+    if resolved.exists() and not overwrite and not append:
+        raise SSHSkillError(
+            f"{option} already exists; use the matching overwrite or append option: {resolved}"
+        )
+    return resolved
+
+
+def open_interactive_log(path: Path | None, *, append: bool, overwrite: bool):
+    if path is None:
+        return None
+    path.parent.mkdir(parents=True, exist_ok=True)
+    mode = "ab" if append else "wb" if overwrite else "xb"
+    return path.open(mode)
+
+
+def write_interactive_summary(path: Path | None, payload: dict[str, Any], *, overwrite: bool) -> None:
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    mode = "w" if overwrite else "x"
+    with path.open(mode, encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+
+
+def current_terminal_size(rows: int | None = None, cols: int | None = None) -> tuple[int, int]:
+    if rows is not None and cols is not None:
+        return rows, cols
+    try:
+        size = os.get_terminal_size(sys.stdin.fileno())
+        terminal_rows = size.lines
+        terminal_cols = size.columns
+    except OSError:
+        terminal_rows = 24
+        terminal_cols = 80
+    return rows or terminal_rows or 24, cols or terminal_cols or 80
+
+
+def write_terminal_output(data: bytes, *, fd: int, log_handle: Any | None) -> None:
+    if not data:
+        return
+    os.write(fd, data)
+    if log_handle is not None:
+        log_handle.write(data)
+        log_handle.flush()
+
+
+def drain_interactive_channel(channel: Any, *, stdout_fd: int, stderr_fd: int, log_handle: Any | None) -> None:
+    while True:
+        received = False
+        if channel.recv_ready():
+            data = channel.recv(BUFFER_SIZE)
+            if data:
+                write_terminal_output(data, fd=stdout_fd, log_handle=log_handle)
+                received = True
+        if channel.recv_stderr_ready():
+            data = channel.recv_stderr(BUFFER_SIZE)
+            if data:
+                write_terminal_output(data, fd=stderr_fd, log_handle=log_handle)
+                received = True
+        if not received:
+            return
+
+
+def bridge_interactive_channel(
+    channel: Any,
+    *,
+    shell_mode: bool,
+    session_timeout: int | None,
+    rows: int | None,
+    cols: int | None,
+    log_handle: Any | None,
+) -> tuple[int, str]:
+    stdin_fd = sys.stdin.fileno()
+    stdout_fd = sys.stdout.fileno()
+    stderr_fd = sys.stderr.fileno()
+    started = time.monotonic()
+    old_attrs = termios.tcgetattr(stdin_fd)
+    old_winch_handler = None
+
+    def resize_pty(_signum: int | None = None, _frame: Any | None = None) -> None:
+        resized_rows, resized_cols = current_terminal_size(rows, cols)
+        try:
+            channel.resize_pty(width=resized_cols, height=resized_rows)
+        except Exception:
+            pass
+
+    try:
+        tty.setraw(stdin_fd)
+        if hasattr(signal, "SIGWINCH"):
+            old_winch_handler = signal.getsignal(signal.SIGWINCH)
+            signal.signal(signal.SIGWINCH, resize_pty)
+        while True:
+            if session_timeout is not None and time.monotonic() - started >= session_timeout:
+                channel.close()
+                return 255, "session timeout"
+
+            try:
+                readables, _, _ = select.select([stdin_fd, channel], [], [], 0.1)
+            except InterruptedError:
+                continue
+            if channel in readables:
+                drain_interactive_channel(
+                    channel,
+                    stdout_fd=stdout_fd,
+                    stderr_fd=stderr_fd,
+                    log_handle=log_handle,
+                )
+            if stdin_fd in readables:
+                data = os.read(stdin_fd, BUFFER_SIZE)
+                if not data or data == b"\x04":
+                    try:
+                        channel.shutdown_write()
+                    except Exception:
+                        pass
+                else:
+                    channel.sendall(data)
+
+            drain_interactive_channel(
+                channel,
+                stdout_fd=stdout_fd,
+                stderr_fd=stderr_fd,
+                log_handle=log_handle,
+            )
+            if channel.exit_status_ready():
+                return int(channel.recv_exit_status()), ""
+            if channel.closed:
+                if channel.exit_status_ready():
+                    return int(channel.recv_exit_status()), ""
+                if shell_mode:
+                    return 0, ""
+                return 255, "ssh channel closed without exit status"
+    finally:
+        termios.tcsetattr(stdin_fd, termios.TCSADRAIN, old_attrs)
+        if old_winch_handler is not None and hasattr(signal, "SIGWINCH"):
+            signal.signal(signal.SIGWINCH, old_winch_handler)
+
+
+def build_interactive_summary(
+    *,
+    target: str,
+    shell_mode: bool,
+    command: str | None,
+    started_at: str,
+    started_monotonic: float,
+    exit_code: int,
+    disconnect_reason: str,
+) -> dict[str, Any]:
+    ended_at = format_timestamp()
+    duration = max(0, int(round(time.monotonic() - started_monotonic)))
+    return {
+        "success": exit_code == 0,
+        "target": target,
+        "mode": "shell" if shell_mode else "command",
+        "command": command or "",
+        "shell": shell_mode,
+        "exit_code": exit_code,
+        "started_at": started_at,
+        "ended_at": ended_at,
+        "duration_seconds": duration,
+        "disconnect_reason": disconnect_reason,
+    }
+
+
+def run_interactive(
+    connection: ConnectionConfig,
+    *,
+    command: str | None,
+    shell_mode: bool,
+    config_path: Path,
+    connect_timeout: int,
+    session_timeout: int | None,
+    term: str,
+    rows: int | None,
+    cols: int | None,
+    summary_path: Path | None,
+    overwrite_summary: bool,
+    log_path: Path | None,
+    append_log: bool,
+    overwrite_log: bool,
+) -> int:
+    started_at = format_timestamp()
+    started_monotonic = time.monotonic()
+    log_handle = None
+    client = None
+    channel = None
+
+    def finish(exit_code: int, reason: str = "") -> int:
+        summary = build_interactive_summary(
+            target=connection.target,
+            shell_mode=shell_mode,
+            command=command,
+            started_at=started_at,
+            started_monotonic=started_monotonic,
+            exit_code=exit_code,
+            disconnect_reason=reason,
+        )
+        try:
+            write_interactive_summary(summary_path, summary, overwrite=overwrite_summary)
+        except Exception as exc:
+            print(f"interactive summary write failed: {exc}", file=sys.stderr)
+        if reason:
+            print(f"interactive: {reason}", file=sys.stderr)
+        return exit_code
+
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        return finish(2, "interactive requires a local TTY; use exec for non-interactive commands")
+
+    try:
+        log_handle = open_interactive_log(log_path, append=append_log, overwrite=overwrite_log)
+        client = connect_client(connection, config_path=config_path, timeout=connect_timeout)
+        initial_rows, initial_cols = current_terminal_size(rows, cols)
+        if shell_mode:
+            channel = client.invoke_shell(
+                term=term,
+                width=initial_cols,
+                height=initial_rows,
+            )
+        else:
+            transport = client.get_transport()
+            if not transport:
+                return finish(255, "ssh transport is unavailable")
+            channel = transport.open_session(timeout=connect_timeout)
+            channel.get_pty(term=term, width=initial_cols, height=initial_rows)
+            channel.exec_command(command or "")
+        exit_code, reason = bridge_interactive_channel(
+            channel,
+            shell_mode=shell_mode,
+            session_timeout=session_timeout,
+            rows=rows,
+            cols=cols,
+            log_handle=log_handle,
+        )
+        return finish(exit_code, reason)
+    except termios.error as exc:
+        return finish(2, f"local TTY setup failed: {exc}")
+    except Exception as exc:
+        message = redact_secrets(f"{type(exc).__name__}: {exc}", {connection.password or ""})
+        return finish(255, message)
+    finally:
+        if channel is not None:
+            try:
+                channel.close()
+            except Exception:
+                pass
+        if log_handle is not None:
+            try:
+                log_handle.close()
+            except Exception:
+                pass
+        if client is not None:
+            close_ssh_client(client)
+
+
 def command_from_remainder(parts: list[str]) -> str:
     if parts and parts[0] == "--":
         parts = parts[1:]
@@ -1357,17 +1643,165 @@ def normalize_exec_args(
     )
 
 
+def interactive_command_from_argv(argv: list[str]) -> tuple[bool, list[str]]:
+    try:
+        index = argv.index("interactive")
+    except ValueError:
+        return False, []
+    tail = argv[index + 1 :]
+    if "--" not in tail:
+        return False, []
+    separator_index = tail.index("--")
+    return True, tail[separator_index + 1 :]
+
+
+def _set_int_arg(args: argparse.Namespace, name: str, raw_value: str, option: str) -> None:
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise SSHSkillError(f"{option} must be an integer") from exc
+    setattr(args, name, value)
+
+
+def normalize_interactive_args(
+    args: argparse.Namespace,
+    *,
+    separator_present: bool,
+    remote_command: list[str],
+) -> tuple[str | None, bool, ConnectionOptions]:
+    command_parts = list(args.remote_command)
+    if separator_present and "--" in command_parts:
+        local_parts = command_parts[: command_parts.index("--")]
+    elif separator_present:
+        local_parts = []
+    else:
+        local_parts = command_parts
+    index = 0
+    while index < len(local_parts):
+        part = local_parts[index]
+        if part == "--username":
+            args.username, index = _value_after_option(local_parts, index, part)
+            continue
+        if part.startswith("--username="):
+            args.username = part.split("=", 1)[1]
+            index += 1
+            continue
+        if part == "--password":
+            args.password, index = _value_after_option(local_parts, index, part)
+            continue
+        if part.startswith("--password="):
+            args.password = part.split("=", 1)[1]
+            index += 1
+            continue
+        if part == "--password-stdin":
+            args.password_stdin = True
+            index += 1
+            continue
+        if part == "--port":
+            raw_port, index = _value_after_option(local_parts, index, part)
+            _set_int_arg(args, "port", raw_port, part)
+            continue
+        if part.startswith("--port="):
+            _set_int_arg(args, "port", part.split("=", 1)[1], "--port")
+            index += 1
+            continue
+        if part == "--connect-timeout":
+            raw_timeout, index = _value_after_option(local_parts, index, part)
+            _set_int_arg(args, "connect_timeout", raw_timeout, part)
+            continue
+        if part.startswith("--connect-timeout="):
+            _set_int_arg(args, "connect_timeout", part.split("=", 1)[1], "--connect-timeout")
+            index += 1
+            continue
+        if part == "--session-timeout":
+            raw_timeout, index = _value_after_option(local_parts, index, part)
+            _set_int_arg(args, "session_timeout", raw_timeout, part)
+            continue
+        if part.startswith("--session-timeout="):
+            _set_int_arg(args, "session_timeout", part.split("=", 1)[1], "--session-timeout")
+            index += 1
+            continue
+        if part == "--term":
+            args.term, index = _value_after_option(local_parts, index, part)
+            continue
+        if part.startswith("--term="):
+            args.term = part.split("=", 1)[1]
+            index += 1
+            continue
+        if part == "--rows":
+            raw_rows, index = _value_after_option(local_parts, index, part)
+            _set_int_arg(args, "rows", raw_rows, part)
+            continue
+        if part.startswith("--rows="):
+            _set_int_arg(args, "rows", part.split("=", 1)[1], "--rows")
+            index += 1
+            continue
+        if part == "--cols":
+            raw_cols, index = _value_after_option(local_parts, index, part)
+            _set_int_arg(args, "cols", raw_cols, part)
+            continue
+        if part.startswith("--cols="):
+            _set_int_arg(args, "cols", part.split("=", 1)[1], "--cols")
+            index += 1
+            continue
+        if part == "--shell":
+            args.shell = True
+            index += 1
+            continue
+        if part == "--summary-file":
+            raw_path, index = _value_after_option(local_parts, index, part)
+            args.summary_file = Path(raw_path)
+            continue
+        if part.startswith("--summary-file="):
+            args.summary_file = Path(part.split("=", 1)[1])
+            index += 1
+            continue
+        if part == "--overwrite-summary":
+            args.overwrite_summary = True
+            index += 1
+            continue
+        if part == "--log-file":
+            raw_path, index = _value_after_option(local_parts, index, part)
+            args.log_file = Path(raw_path)
+            continue
+        if part.startswith("--log-file="):
+            args.log_file = Path(part.split("=", 1)[1])
+            index += 1
+            continue
+        if part == "--append-log":
+            args.append_log = True
+            index += 1
+            continue
+        if part == "--overwrite-log":
+            args.overwrite_log = True
+            index += 1
+            continue
+        raise SSHSkillError(f"Unknown interactive option before --: {part}")
+
+    if args.append_log and args.overwrite_log:
+        raise SSHSkillError("--append-log and --overwrite-log cannot be used together")
+
+    options = prepare_connection_options(_connection_options_from_args(args))
+    shell_mode = bool(args.shell)
+    if shell_mode:
+        if separator_present and remote_command:
+            raise SSHSkillError("--shell cannot be combined with a remote command")
+        return None, True, options
+    if not separator_present:
+        raise SSHSkillError("interactive requires -- <remote command> or --shell")
+    return command_from_remainder(remote_command), False, options
+
+
 def add_connection_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--username", help="SSH username")
-    password_group = parser.add_mutually_exclusive_group()
-    password_group.add_argument(
+    parser.add_argument(
         "--password",
         help="SSH password (may be exposed in shell history and process listings)",
     )
-    password_group.add_argument(
+    parser.add_argument(
         "--password-stdin",
         action="store_true",
-        help="Read the SSH password from stdin",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument("--port", type=int, help="SSH port")
     parser.add_argument(
@@ -1376,6 +1810,20 @@ def add_connection_arguments(parser: argparse.ArgumentParser) -> None:
         help="Save the successfully authenticated username/password in the current project",
     )
     parser.add_argument("--save-as", help="Project credential profile name; requires --save")
+
+
+def add_interactive_connection_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--username", help="SSH username")
+    parser.add_argument(
+        "--password",
+        help="SSH password (may be exposed in shell history and process listings)",
+    )
+    parser.add_argument(
+        "--password-stdin",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument("--port", type=int, help="SSH port")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1400,6 +1848,26 @@ def build_parser() -> argparse.ArgumentParser:
     exec_parser.add_argument("--no-daemon", action="store_true")
     add_connection_arguments(exec_parser)
     exec_parser.add_argument("remote_command", nargs=argparse.REMAINDER)
+
+    interactive_parser = subparsers.add_parser(
+        "interactive",
+        help="Run a remote command or shell through a local interactive PTY",
+    )
+    interactive_parser.add_argument("target")
+    add_interactive_connection_arguments(interactive_parser)
+    interactive_parser.add_argument("--connect-timeout", type=int, default=30)
+    interactive_parser.add_argument("--session-timeout", type=int)
+    interactive_parser.add_argument("--term")
+    interactive_parser.add_argument("--rows", type=int)
+    interactive_parser.add_argument("--cols", type=int)
+    interactive_parser.add_argument("--shell", action="store_true")
+    interactive_parser.add_argument("--summary-file", type=Path)
+    interactive_parser.add_argument("--overwrite-summary", action="store_true")
+    interactive_parser.add_argument("--log-file", type=Path)
+    log_group = interactive_parser.add_mutually_exclusive_group()
+    log_group.add_argument("--append-log", action="store_true")
+    log_group.add_argument("--overwrite-log", action="store_true")
+    interactive_parser.add_argument("remote_command", nargs=argparse.REMAINDER)
 
     upload_parser = subparsers.add_parser("upload", help="Upload a file or directory")
     upload_parser.add_argument("target")
@@ -1446,7 +1914,8 @@ def redact_secrets(message: str, secrets: set[str]) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(raw_argv)
     config_path = Path(args.config).expanduser()
     root = Path(args.root).resolve()
     secret_values: set[str] = set()
@@ -1569,6 +2038,60 @@ def main(argv: list[str] | None = None) -> int:
             result["operation"] = "exec"
             json_print(result)
             return 0 if result.get("success") else 1
+        if args.command == "interactive":
+            separator_present, remote_command = interactive_command_from_argv(raw_argv)
+            command, shell_mode, options = normalize_interactive_args(
+                args,
+                separator_present=separator_present,
+                remote_command=remote_command,
+            )
+            if options.password:
+                secret_values.add(options.password)
+            connect_timeout = validate_positive_int(args.connect_timeout, "--connect-timeout")
+            session_timeout = validate_positive_int(args.session_timeout, "--session-timeout")
+            rows = validate_positive_int(args.rows, "--rows")
+            cols = validate_positive_int(args.cols, "--cols")
+            summary_path = prepare_output_path(
+                args.summary_file,
+                root=root,
+                option="--summary-file",
+                overwrite=bool(args.overwrite_summary),
+            )
+            log_path = prepare_output_path(
+                args.log_file,
+                root=root,
+                option="--log-file",
+                overwrite=bool(args.overwrite_log),
+                append=bool(args.append_log),
+            )
+            term = (args.term or os.environ.get("TERM") or "xterm-256color").strip()
+            if not term:
+                term = "xterm-256color"
+            connection = resolve_connection(
+                args.target,
+                config_path=config_path,
+                root=root,
+                options=options,
+            )
+            if connection.password:
+                secret_values.add(connection.password)
+            ensure_paramiko()
+            return run_interactive(
+                connection,
+                command=command,
+                shell_mode=shell_mode,
+                config_path=config_path,
+                connect_timeout=int(connect_timeout or 30),
+                session_timeout=session_timeout,
+                term=term,
+                rows=rows,
+                cols=cols,
+                summary_path=summary_path,
+                overwrite_summary=bool(args.overwrite_summary),
+                log_path=log_path,
+                append_log=bool(args.append_log),
+                overwrite_log=bool(args.overwrite_log),
+            )
         if args.command == "upload":
             options = prepare_connection_options(_connection_options_from_args(args))
             if options.password:
