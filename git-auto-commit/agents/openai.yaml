@@ -1,0 +1,3 @@
+interface:
+  display_name: "Git Auto Commit"
+  short_description: "Analyze git changes and craft detailed repository-style commits"

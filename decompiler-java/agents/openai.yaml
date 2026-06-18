@@ -1,0 +1,3 @@
+interface:
+  display_name: "Java Decompiler"
+  short_description: "Decompile .class files and JARs with the bundled JavaDecompiler tool"
