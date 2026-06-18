@@ -1,0 +1,4 @@
+interface:
+  display_name: "SSH Skill"
+  short_description: "Run SSH commands through a JSON CLI"
+  default_prompt: "Use $ssh-skill to test an SSH target and run a non-interactive command."

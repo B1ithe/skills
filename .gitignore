@@ -1,0 +1,66 @@
+# macOS
+.DS_Store
+.DS_Store?
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.vim/
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.python-version
+.env
+.venv/
+env/
+build/
+dist/
+
+# Node / JS
+node_modules/
+.pnpm-store/
+.yarn/
+.yarnrc.yml
+coverage/
+
+# Java / JVM / Gradle / Maven
+*.class
+*.jar
+*.war
+*.ear
+.gradle/
+build/
+out/
+.gradle-cache/
+
+# Rust
+.target/
+Cargo.lock
+
+# Go
+bin/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+.terraform.lock.hcl
+
+# Misc generated
+generated/
+tmp/
