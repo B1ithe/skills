@@ -1,0 +1,4 @@
+interface:
+  display_name: "Docker Skill"
+  short_description: "Operate, debug, and containerize Docker projects"
+  default_prompt: "Use $docker-skill to inspect, operate, or containerize this Docker and Docker Compose project."
