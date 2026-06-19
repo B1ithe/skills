@@ -1,4 +1,4 @@
 interface:
   display_name: "SSH Skill"
-  short_description: "Run SSH commands through a JSON CLI"
-  default_prompt: "Use $ssh-skill to test an SSH target and run a non-interactive command."
+  short_description: "Run SSH commands with direct auth, profiles, and daemon reuse"
+  default_prompt: "Use $ssh-skill to test an SSH target with password or --identity-file, then run a non-interactive command."

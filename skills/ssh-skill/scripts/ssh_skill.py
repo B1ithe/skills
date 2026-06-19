@@ -30,9 +30,11 @@ IDLE_TIMEOUT_SECONDS = 1800
 HEARTBEAT_SECONDS = 60
 MAX_MESSAGE_BYTES = 10 * 1024 * 1024
 BUFFER_SIZE = 65536
-CREDENTIALS_SCHEMA_VERSION = 1
-CREDENTIALS_FILE_NAME = ".credentials.json"
-CREDENTIALS_GITIGNORE_ENTRY = f"/{CREDENTIALS_FILE_NAME}"
+PROFILES_SCHEMA_VERSION = 1
+PROFILES_FILE_NAME = "profiles.json"
+PROFILES_GITIGNORE_ENTRY = f"/{PROFILES_FILE_NAME}"
+AUTH_PASSWORD = "password"
+AUTH_IDENTITY_FILE = "identity-file"
 
 
 class SSHSkillError(Exception):
@@ -44,62 +46,40 @@ class DependencyError(SSHSkillError):
 
 
 @dataclass
-class HostEntry:
-    alias: str
-    hostname: str = ""
-    user: str = ""
-    port: int = 22
-    identity_file: str | None = None
-    proxy_jump: str | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-    def as_dict(self) -> dict[str, Any]:
-        auth = "key" if self.identity_file else "agent-or-default"
-        return {
-            "alias": self.alias,
-            "hostname": self.hostname,
-            "user": self.user,
-            "port": self.port,
-            "identity_file": self.identity_file,
-            "proxy_jump": self.proxy_jump,
-            "auth": auth,
-            "metadata": {
-                "description": self.metadata.get("description", ""),
-                "environment": self.metadata.get("environment", ""),
-                "tags": self.metadata.get("tags", []),
-                "location": self.metadata.get("location", ""),
-            },
-            "source": "ssh-config",
-        }
-
-
-@dataclass
 class ProjectProfile:
     name: str
     hostname: str
     username: str
-    password: str = field(repr=False)
+    auth: str
+    password: str | None = field(default=None, repr=False)
+    identity_file: str | None = None
     port: int = 22
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "name": self.name,
             "alias": self.name,
             "hostname": self.hostname,
             "user": self.username,
             "username": self.username,
             "port": self.port,
-            "identity_file": None,
-            "proxy_jump": None,
-            "auth": "password",
-            "metadata": {
-                "description": "",
-                "environment": "",
-                "tags": [],
-                "location": "",
-            },
-            "source": "project-credentials",
+            "auth": self.auth,
+            "source": "project-profile",
         }
+        if self.auth == AUTH_IDENTITY_FILE:
+            payload["identity_file"] = self.identity_file
+        return payload
+
+    def to_connection(self) -> "ConnectionConfig":
+        return ConnectionConfig(
+            target=self.name,
+            hostname=self.hostname,
+            username=self.username,
+            port=self.port,
+            password=self.password,
+            identity_file=self.identity_file,
+            source="project-profile",
+        )
 
 
 @dataclass
@@ -110,43 +90,32 @@ class ConnectionConfig:
     port: int = 22
     password: str | None = field(default=None, repr=False)
     identity_file: str | None = None
-    proxy_jump: str | None = None
     source: str = "direct"
+
+    def has_auth(self) -> bool:
+        return self.password is not None or self.identity_file is not None
 
 
 @dataclass
 class ConnectionOptions:
     username: str | None = None
     password: str | None = field(default=None, repr=False)
-    password_stdin: bool = False
+    identity_file: str | None = None
     port: int | None = None
     save: bool = False
     save_as: str | None = None
-
-    def has_explicit_connection_values(self) -> bool:
-        return any(
-            (
-                self.username is not None,
-                self.password is not None,
-                self.port is not None,
-            )
-        )
 
 
 def script_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def default_config_path() -> Path:
-    return Path.home() / ".ssh" / "config"
-
-
 def ssh_skill_state_dir(root: Path | None = None) -> Path:
     return (root or Path.cwd()) / ".ssh-skill"
 
 
-def credentials_path(root: Path | None = None) -> Path:
-    return ssh_skill_state_dir(root) / CREDENTIALS_FILE_NAME
+def profiles_path(root: Path | None = None) -> Path:
+    return ssh_skill_state_dir(root) / PROFILES_FILE_NAME
 
 
 def paramiko_available() -> bool:
@@ -193,25 +162,47 @@ def validate_port(port: int) -> int:
 def validate_profile_name(name: str) -> str:
     normalized = name.strip()
     if not normalized:
-        raise SSHSkillError("Credential profile name must not be empty")
+        raise SSHSkillError("Profile name must not be empty")
     if any(ord(character) < 32 for character in normalized):
-        raise SSHSkillError("Credential profile name must not contain control characters")
+        raise SSHSkillError("Profile name must not contain control characters")
     return normalized
 
 
-def _check_credentials_file_security(path: Path) -> None:
+def normalize_identity_file_path(path: str) -> str:
+    normalized = path.strip()
+    if not normalized:
+        raise SSHSkillError("--identity-file requires a non-empty path")
+    return str(Path(normalized).expanduser().resolve(strict=False))
+
+
+def validate_identity_file(path: str) -> str:
+    normalized = normalize_identity_file_path(path)
+    identity_path = Path(normalized)
+    if not identity_path.exists():
+        raise SSHSkillError(f"Identity file not found: {normalized}")
+    if not identity_path.is_file():
+        raise SSHSkillError(f"Identity file is not a file: {normalized}")
+    return normalized
+
+
+def validate_connection_auth_files(connection: ConnectionConfig) -> None:
+    if connection.identity_file is not None:
+        connection.identity_file = validate_identity_file(connection.identity_file)
+
+
+def _check_profiles_file_security(path: Path) -> None:
     if path.is_symlink():
-        raise SSHSkillError(f"Refusing to use symlinked credentials file: {path}")
+        raise SSHSkillError(f"Refusing to use symlinked profiles file: {path}")
     if not path.exists() or os.name == "nt":
         return
     mode = stat.S_IMODE(path.stat().st_mode)
     if mode & 0o077:
         raise SSHSkillError(
-            f"Credentials file permissions are too broad: {path} has mode {mode:04o}; expected 0600"
+            f"Profiles file permissions are too broad: {path} has mode {mode:04o}; expected 0600"
         )
 
 
-def _ensure_credentials_directory(root: Path) -> Path:
+def _ensure_profiles_directory(root: Path) -> Path:
     directory = ssh_skill_state_dir(root)
     if directory.is_symlink():
         raise SSHSkillError(f"Refusing to use symlinked SSH skill state directory: {directory}")
@@ -223,85 +214,105 @@ def _ensure_credentials_directory(root: Path) -> Path:
 
 def load_project_profiles(root: Path | None = None) -> dict[str, ProjectProfile]:
     project_root = root or Path.cwd()
-    path = credentials_path(project_root)
+    path = profiles_path(project_root)
     if not path.exists() and not path.is_symlink():
         return {}
-    _check_credentials_file_security(path)
+    _check_profiles_file_security(path)
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise SSHSkillError(f"Unable to read project SSH credentials: {path}") from exc
-    if not isinstance(payload, dict) or payload.get("schema_version") != CREDENTIALS_SCHEMA_VERSION:
+        raise SSHSkillError(f"Unable to read SSH profiles: {path}") from exc
+    if not isinstance(payload, dict) or payload.get("schema_version") != PROFILES_SCHEMA_VERSION:
         raise SSHSkillError(
-            f"Unsupported project SSH credentials schema in {path}; expected schema_version "
-            f"{CREDENTIALS_SCHEMA_VERSION}"
+            f"Unsupported SSH profiles schema in {path}; expected schema_version "
+            f"{PROFILES_SCHEMA_VERSION}"
         )
     raw_profiles = payload.get("profiles")
     if not isinstance(raw_profiles, dict):
-        raise SSHSkillError(f"Invalid project SSH credentials profiles in {path}")
+        raise SSHSkillError(f"Invalid SSH profiles in {path}")
 
     profiles: dict[str, ProjectProfile] = {}
     for raw_name, raw_profile in raw_profiles.items():
         if not isinstance(raw_name, str) or not isinstance(raw_profile, dict):
-            raise SSHSkillError(f"Invalid project SSH credential profile in {path}")
+            raise SSHSkillError(f"Invalid SSH profile in {path}")
         name = validate_profile_name(raw_name)
         hostname = raw_profile.get("hostname")
         username = raw_profile.get("username")
+        auth = raw_profile.get("auth")
         password = raw_profile.get("password")
+        identity_file = raw_profile.get("identity_file")
         port = raw_profile.get("port", 22)
         if not isinstance(hostname, str) or not hostname.strip():
-            raise SSHSkillError(f"Credential profile {name!r} has an invalid hostname")
+            raise SSHSkillError(f"Profile {name!r} has an invalid hostname")
         if not isinstance(username, str) or not username.strip():
-            raise SSHSkillError(f"Credential profile {name!r} has an invalid username")
-        if not isinstance(password, str) or not password:
-            raise SSHSkillError(f"Credential profile {name!r} has an invalid password")
+            raise SSHSkillError(f"Profile {name!r} has an invalid username")
+        if auth not in {AUTH_PASSWORD, AUTH_IDENTITY_FILE}:
+            raise SSHSkillError(
+                f"Profile {name!r} has an invalid auth; expected {AUTH_PASSWORD!r} or {AUTH_IDENTITY_FILE!r}"
+            )
+        if auth == AUTH_PASSWORD:
+            if not isinstance(password, str) or not password:
+                raise SSHSkillError(f"Profile {name!r} has an invalid password")
+            identity_file = None
+        else:
+            if not isinstance(identity_file, str) or not identity_file.strip():
+                raise SSHSkillError(f"Profile {name!r} has an invalid identity_file")
+            password = None
+            identity_file = normalize_identity_file_path(identity_file)
         if not isinstance(port, int) or isinstance(port, bool):
-            raise SSHSkillError(f"Credential profile {name!r} has an invalid port")
+            raise SSHSkillError(f"Profile {name!r} has an invalid port")
         profiles[name] = ProjectProfile(
             name=name,
             hostname=hostname.strip(),
             username=username.strip(),
+            auth=auth,
             password=password,
+            identity_file=identity_file,
             port=validate_port(port),
         )
     return profiles
 
 
-def _write_credentials_gitignore(directory: Path) -> None:
+def _write_profiles_gitignore(directory: Path) -> None:
     path = directory / ".gitignore"
     if path.is_symlink():
         raise SSHSkillError(f"Refusing to use symlinked SSH skill gitignore: {path}")
     existing = path.read_text(encoding="utf-8") if path.exists() else ""
     lines = existing.splitlines()
-    if CREDENTIALS_GITIGNORE_ENTRY in lines:
+    if PROFILES_GITIGNORE_ENTRY in lines:
         return
     prefix = existing
     if prefix and not prefix.endswith("\n"):
         prefix += "\n"
-    path.write_text(f"{prefix}{CREDENTIALS_GITIGNORE_ENTRY}\n", encoding="utf-8")
+    path.write_text(f"{prefix}{PROFILES_GITIGNORE_ENTRY}\n", encoding="utf-8")
 
 
 def write_project_profiles(profiles: dict[str, ProjectProfile], root: Path | None = None) -> None:
     project_root = root or Path.cwd()
-    directory = _ensure_credentials_directory(project_root)
-    path = credentials_path(project_root)
+    directory = _ensure_profiles_directory(project_root)
+    path = profiles_path(project_root)
     if path.exists() or path.is_symlink():
-        _check_credentials_file_security(path)
-    _write_credentials_gitignore(directory)
+        _check_profiles_file_security(path)
+    _write_profiles_gitignore(directory)
     payload = {
-        "schema_version": CREDENTIALS_SCHEMA_VERSION,
+        "schema_version": PROFILES_SCHEMA_VERSION,
         "profiles": {
             name: {
                 "hostname": profile.hostname,
                 "port": profile.port,
                 "username": profile.username,
-                "password": profile.password,
+                "auth": profile.auth,
+                **(
+                    {"password": profile.password}
+                    if profile.auth == AUTH_PASSWORD
+                    else {"identity_file": profile.identity_file}
+                ),
             }
             for name, profile in sorted(profiles.items())
         },
     }
     descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f"{CREDENTIALS_FILE_NAME}.",
+        prefix=f"{PROFILES_FILE_NAME}.",
         suffix=".tmp",
         dir=directory,
     )
@@ -327,22 +338,38 @@ def save_project_profile(
     connection: ConnectionConfig,
     *,
     root: Path,
+    stop_daemons: bool = True,
 ) -> ProjectProfile:
     profile_name = validate_profile_name(name)
     if not connection.username:
-        raise SSHSkillError("Saving SSH credentials requires a username")
-    if not connection.password:
-        raise SSHSkillError("Saving SSH credentials requires a password")
+        raise SSHSkillError("Saving an SSH profile requires a username")
+    if connection.password and connection.identity_file:
+        raise SSHSkillError(
+            "Saving an SSH profile requires either password or identity_file, not both"
+        )
+    if not connection.password and not connection.identity_file:
+        raise SSHSkillError("Saving an SSH profile requires --password or --identity-file")
+    auth = AUTH_PASSWORD if connection.password is not None else AUTH_IDENTITY_FILE
     profile = ProjectProfile(
         name=profile_name,
         hostname=connection.hostname,
         username=connection.username,
+        auth=auth,
         password=connection.password,
+        identity_file=(
+            normalize_identity_file_path(connection.identity_file)
+            if connection.identity_file
+            else None
+        ),
         port=connection.port,
     )
     profiles = load_project_profiles(root)
+    old_profile = profiles.get(profile_name)
+    if stop_daemons and old_profile is not None:
+        daemon_stop(old_profile.to_connection(), root=root)
     profiles[profile_name] = profile
-    daemon_stop(profile_name, root=root)
+    if stop_daemons:
+        daemon_stop(profile.to_connection(), root=root)
     write_project_profiles(profiles, root)
     return profile
 
@@ -352,160 +379,31 @@ def remove_project_profile(name: str, *, root: Path) -> dict[str, Any]:
     profiles = load_project_profiles(root)
     if profile_name not in profiles:
         return {"success": False, "removed": False, "name": profile_name}
-    daemon_stop(profile_name, root=root)
+    daemon_stop(profiles[profile_name].to_connection(), root=root)
     del profiles[profile_name]
     write_project_profiles(profiles, root)
     return {"success": True, "removed": True, "name": profile_name}
 
 
-def parse_metadata(comment_lines: list[str]) -> dict[str, Any]:
-    metadata: dict[str, Any] = {
-        "description": "",
-        "environment": "",
-        "tags": [],
-        "location": "",
-    }
-    for raw_line in comment_lines:
-        line = raw_line.strip()
-        if not line.startswith("#"):
-            continue
-        line = line[1:].strip()
-        if not line or line.startswith("=====") or ":" not in line:
-            continue
-        key, value = line.split(":", 1)
-        key = key.strip().lower()
-        value = value.strip()
-        if key == "tags":
-            metadata["tags"] = [item.strip() for item in value.split(",") if item.strip()]
-        elif key in {"description", "environment", "location"}:
-            metadata[key] = value
-    return metadata
-
-
-def _host_aliases(value: str) -> list[str]:
-    aliases = shlex.split(value, comments=True, posix=True)
-    return [
-        alias
-        for alias in aliases
-        if "*" not in alias and "?" not in alias and not alias.startswith("!")
-    ]
-
-
-def load_hosts_from_config(config_path: Path | None = None) -> list[HostEntry]:
-    path = config_path or default_config_path()
-    if not path.exists():
-        return []
-
-    hosts: list[HostEntry] = []
-    current_aliases: list[str] = []
-    current_options: dict[str, str] = {}
-    current_metadata: dict[str, Any] = {}
-    pending_comments: list[str] = []
-
-    def flush_current() -> None:
-        if not current_aliases:
-            return
-        for alias in current_aliases:
-            hosts.append(
-                HostEntry(
-                    alias=alias,
-                    hostname=current_options.get("hostname", alias),
-                    user=current_options.get("user", ""),
-                    port=_parse_port(current_options.get("port")),
-                    identity_file=current_options.get("identityfile"),
-                    proxy_jump=current_options.get("proxyjump"),
-                    metadata=dict(current_metadata),
-                )
-            )
-
-    with path.open("r", encoding="utf-8") as handle:
-        for raw_line in handle:
-            stripped = raw_line.strip()
-            if not stripped:
-                continue
-            if stripped.startswith("#"):
-                pending_comments.append(raw_line)
-                continue
-            parts = stripped.split(None, 1)
-            if not parts:
-                continue
-            key = parts[0].lower()
-            value = parts[1].strip() if len(parts) > 1 else ""
-            if key == "host":
-                flush_current()
-                current_aliases = _host_aliases(value)
-                current_options = {}
-                current_metadata = parse_metadata(pending_comments)
-                pending_comments = []
-                continue
-            if current_aliases:
-                current_options[key] = value
-            else:
-                pending_comments = []
-            pending_comments = []
-
-    flush_current()
-    return hosts
-
-
-def _parse_port(value: str | None) -> int:
-    if not value:
-        return 22
-    try:
-        return int(value)
-    except ValueError:
-        return 22
-
-
-def find_host(alias: str, config_path: Path | None = None) -> HostEntry:
-    for host in load_hosts_from_config(config_path):
-        if host.alias == alias:
-            return host
-    raise SSHSkillError(f"SSH alias not found in {config_path or default_config_path()}: {alias}")
-
-
-def find_hosts(keyword: str, config_path: Path | None = None) -> list[HostEntry]:
-    needle = keyword.lower()
-    matches: list[HostEntry] = []
-    for host in load_hosts_from_config(config_path):
-        haystack = [
-            host.alias,
-            host.hostname,
-            host.user,
-            host.metadata.get("description", ""),
-            host.metadata.get("environment", ""),
-            host.metadata.get("location", ""),
-            " ".join(host.metadata.get("tags", [])),
-        ]
-        if any(needle in str(value).lower() for value in haystack):
-            matches.append(host)
-    return matches
-
-
-def list_targets(*, config_path: Path, root: Path) -> list[dict[str, Any]]:
+def list_targets(*, root: Path) -> list[dict[str, Any]]:
     profiles = load_project_profiles(root)
-    targets = [profile.as_dict() for profile in profiles.values()]
-    targets.extend(
-        host.as_dict()
-        for host in load_hosts_from_config(config_path)
-        if host.alias not in profiles
+    return sorted(
+        (profile.as_dict() for profile in profiles.values()),
+        key=lambda item: str(item["alias"]).lower(),
     )
-    return sorted(targets, key=lambda item: str(item["alias"]).lower())
 
 
-def find_targets(keyword: str, *, config_path: Path, root: Path) -> list[dict[str, Any]]:
+def find_targets(keyword: str, *, root: Path) -> list[dict[str, Any]]:
     needle = keyword.lower()
     matches: list[dict[str, Any]] = []
-    for target in list_targets(config_path=config_path, root=root):
-        metadata = target.get("metadata", {})
+    for target in list_targets(root=root):
         haystack = [
             target.get("alias", ""),
             target.get("hostname", ""),
             target.get("user", ""),
-            metadata.get("description", ""),
-            metadata.get("environment", ""),
-            metadata.get("location", ""),
-            " ".join(metadata.get("tags", [])),
+            target.get("username", ""),
+            target.get("auth", ""),
+            target.get("identity_file", ""),
         ]
         if any(needle in str(value).lower() for value in haystack):
             matches.append(target)
@@ -513,21 +411,22 @@ def find_targets(keyword: str, *, config_path: Path, root: Path) -> list[dict[st
 
 
 def prepare_connection_options(options: ConnectionOptions) -> ConnectionOptions:
-    if options.password_stdin:
-        raise SSHSkillError(
-            "--password-stdin has been removed; use --password or a saved profile"
-        )
     if options.save_as is not None and not options.save:
         raise SSHSkillError("--save-as requires --save")
     password = options.password
     if password == "":
         raise SSHSkillError("--password requires a non-empty password")
+    identity_file = options.identity_file
+    if identity_file == "":
+        raise SSHSkillError("--identity-file requires a non-empty path")
+    if password is not None and identity_file is not None:
+        raise SSHSkillError("--password and --identity-file cannot be used together")
     if options.port is not None:
         validate_port(options.port)
     return ConnectionOptions(
         username=options.username,
         password=password,
-        password_stdin=options.password_stdin,
+        identity_file=normalize_identity_file_path(identity_file) if identity_file is not None else None,
         port=options.port,
         save=options.save,
         save_as=options.save_as,
@@ -537,45 +436,22 @@ def prepare_connection_options(options: ConnectionOptions) -> ConnectionOptions:
 def resolve_connection(
     target: str,
     *,
-    config_path: Path,
     root: Path,
     options: ConnectionOptions | None = None,
+    require_auth: bool = False,
 ) -> ConnectionConfig:
     if not target.strip():
         raise SSHSkillError("SSH target must not be empty")
     overrides = options or ConnectionOptions()
     profiles = load_project_profiles(root)
     if target in profiles:
-        profile = profiles[target]
+        connection = profiles[target].to_connection()
+    else:
         connection = ConnectionConfig(
             target=target,
-            hostname=profile.hostname,
-            username=profile.username,
-            port=profile.port,
-            password=profile.password,
-            source="project-credentials",
+            hostname=target.strip(),
+            source="direct",
         )
-    else:
-        config_host = next(
-            (host for host in load_hosts_from_config(config_path) if host.alias == target),
-            None,
-        )
-        if config_host:
-            connection = ConnectionConfig(
-                target=target,
-                hostname=config_host.hostname or target,
-                username=config_host.user or None,
-                port=config_host.port,
-                identity_file=config_host.identity_file,
-                proxy_jump=config_host.proxy_jump,
-                source="ssh-config",
-            )
-        else:
-            connection = ConnectionConfig(
-                target=target,
-                hostname=target,
-                source="direct",
-            )
 
     if overrides.username is not None:
         username = overrides.username.strip()
@@ -584,31 +460,74 @@ def resolve_connection(
         connection.username = username
     if overrides.password is not None:
         connection.password = overrides.password
+        connection.identity_file = None
+    if overrides.identity_file is not None:
+        connection.identity_file = overrides.identity_file
+        connection.password = None
     if overrides.port is not None:
         connection.port = validate_port(overrides.port)
+
+    if not connection.username:
+        raise SSHSkillError("Direct SSH targets require --username unless the target is a saved profile")
+    if connection.password and connection.identity_file:
+        raise SSHSkillError("Connection cannot use both password and identity_file")
     if connection.password and not connection.username:
         raise SSHSkillError(
-            "Password authentication requires a username via --username or configuration"
+            "Password authentication requires a username via --username or a saved profile"
+        )
+    if require_auth and not connection.has_auth():
+        raise SSHSkillError(
+            "No authentication available; provide --password, --identity-file, or use a saved profile"
         )
     if overrides.save:
         if not connection.username:
-            raise SSHSkillError("Saving SSH credentials requires a username")
-        if not connection.password:
-            raise SSHSkillError("Saving SSH credentials requires a password")
+            raise SSHSkillError("Saving an SSH profile requires a username")
+        if not connection.has_auth():
+            raise SSHSkillError("Saving an SSH profile requires --password or --identity-file")
         validate_profile_name(overrides.save_as or target)
     return connection
+
+
+def resolve_control_connection(target: str, *, root: Path, username: str | None, port: int | None) -> ConnectionConfig:
+    options = ConnectionOptions(username=username, port=port)
+    return resolve_connection(
+        target,
+        root=root,
+        options=prepare_connection_options(options),
+        require_auth=False,
+    )
 
 
 def daemon_state_dir(root: Path | None = None) -> Path:
     return ssh_skill_state_dir(root) / "daemon"
 
 
-def daemon_id(alias: str) -> str:
-    return hashlib.md5(alias.lower().encode("utf-8")).hexdigest()[:12]
+def ensure_daemon_directory(root: Path) -> Path:
+    directory = daemon_state_dir(root)
+    if directory.is_symlink():
+        raise SSHSkillError(f"Refusing to use symlinked SSH skill daemon directory: {directory}")
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if os.name != "nt":
+        directory.chmod(0o700)
+    return directory
 
 
-def daemon_info_path(alias: str, root: Path | None = None) -> Path:
-    return daemon_state_dir(root) / f"{daemon_id(alias)}.json"
+def daemon_key(hostname: str, port: int, username: str) -> str:
+    return f"{hostname.strip().lower()}:{validate_port(port)}:{username.strip()}"
+
+
+def daemon_key_for_connection(connection: ConnectionConfig) -> str:
+    if not connection.username:
+        raise SSHSkillError("Daemon lookup requires a username")
+    return daemon_key(connection.hostname, connection.port, connection.username)
+
+
+def daemon_id(key: str) -> str:
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+
+
+def daemon_info_path(key: str, root: Path | None = None) -> Path:
+    return daemon_state_dir(root) / f"{daemon_id(key)}.json"
 
 
 def is_process_alive(pid: int) -> bool:
@@ -619,13 +538,16 @@ def is_process_alive(pid: int) -> bool:
         return False
 
 
-def read_daemon_info(alias: str, root: Path | None = None) -> dict[str, Any] | None:
-    path = daemon_info_path(alias, root)
+def read_daemon_info(key: str, root: Path | None = None) -> dict[str, Any] | None:
+    path = daemon_info_path(key, root)
     if not path.exists():
         return None
     try:
         info = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
+        path.unlink(missing_ok=True)
+        return None
+    if info.get("key") != key:
         path.unlink(missing_ok=True)
         return None
     pid = info.get("pid")
@@ -635,10 +557,9 @@ def read_daemon_info(alias: str, root: Path | None = None) -> dict[str, Any] | N
     return None
 
 
-def write_daemon_info(alias: str, info: dict[str, Any], root: Path | None = None) -> None:
-    directory = daemon_state_dir(root)
-    directory.mkdir(parents=True, exist_ok=True)
-    daemon_info_path(alias, root).write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
+def write_daemon_info(key: str, info: dict[str, Any], root: Path | None = None) -> None:
+    directory = ensure_daemon_directory(root or Path.cwd())
+    daemon_info_path(key, root).write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def send_message(sock: socket.socket, payload: dict[str, Any]) -> None:
@@ -667,21 +588,9 @@ def recv_message(sock: socket.socket, timeout: float | None = None) -> dict[str,
     return json.loads(body.decode("utf-8"))
 
 
-def build_proxy_command(paramiko: Any, connection: ConnectionConfig, config_path: Path) -> Any:
-    if not connection.proxy_jump:
-        return None
-    hostname = connection.hostname or connection.target
-    port = connection.port or 22
-    proxy_jump = connection.proxy_jump
-    if "," in proxy_jump:
-        jumps = [item.strip() for item in proxy_jump.split(",") if item.strip()]
-        command = f"ssh -F {shlex.quote(str(config_path))} -J {shlex.quote(','.join(jumps[:-1]))} -W {shlex.quote(hostname)}:{port} {shlex.quote(jumps[-1])}"
-    else:
-        command = f"ssh -F {shlex.quote(str(config_path))} -W {shlex.quote(hostname)}:{port} {shlex.quote(proxy_jump)}"
-    return paramiko.ProxyCommand(command)
-
-
-def connect_client(connection: ConnectionConfig, *, config_path: Path, timeout: int):
+def connect_client(connection: ConnectionConfig, *, timeout: int):
+    if not connection.has_auth():
+        raise SSHSkillError("Connection requires --password, --identity-file, or a saved profile")
     paramiko = ensure_paramiko()
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -693,33 +602,23 @@ def connect_client(connection: ConnectionConfig, *, config_path: Path, timeout: 
         "timeout": timeout,
         "banner_timeout": timeout,
         "auth_timeout": timeout,
-        "allow_agent": connection.password is None,
-        "look_for_keys": connection.password is None,
+        "allow_agent": False,
+        "look_for_keys": False,
     }
-    if connection.identity_file and connection.password is None:
-        connect_kwargs["key_filename"] = os.path.expanduser(connection.identity_file)
+    if connection.identity_file is not None:
+        connect_kwargs["key_filename"] = validate_identity_file(connection.identity_file)
     if connection.password is not None:
         connect_kwargs["password"] = connection.password
-    proxy = build_proxy_command(paramiko, connection, config_path)
-    if proxy is not None:
-        connect_kwargs["sock"] = proxy
     client.connect(**connect_kwargs)
     return client
 
 
 def connect_target(
-    target: str,
+    connection: ConnectionConfig,
     *,
-    config_path: Path,
-    root: Path,
     timeout: int,
 ) -> tuple[ConnectionConfig, Any]:
-    connection = resolve_connection(
-        target,
-        config_path=config_path,
-        root=root,
-    )
-    return connection, connect_client(connection, config_path=config_path, timeout=timeout)
+    return connection, connect_client(connection, timeout=timeout)
 
 
 def close_ssh_client(client: Any) -> None:
@@ -738,23 +637,48 @@ def close_ssh_client(client: Any) -> None:
                 pass
 
 
+def read_exec_result(stdout: Any, stderr: Any, *, timeout: int) -> tuple[int, str, str]:
+    channel = stdout.channel
+    stdout_chunks: list[bytes] = []
+    stderr_chunks: list[bytes] = []
+    deadline = time.monotonic() + timeout if timeout > 0 else None
+
+    while True:
+        while channel.recv_ready():
+            stdout_chunks.append(channel.recv(BUFFER_SIZE))
+        while channel.recv_stderr_ready():
+            stderr_chunks.append(channel.recv_stderr(BUFFER_SIZE))
+        if channel.exit_status_ready():
+            while channel.recv_ready():
+                stdout_chunks.append(channel.recv(BUFFER_SIZE))
+            while channel.recv_stderr_ready():
+                stderr_chunks.append(channel.recv_stderr(BUFFER_SIZE))
+            exit_code = int(channel.recv_exit_status())
+            return (
+                exit_code,
+                b"".join(stdout_chunks).decode("utf-8", errors="replace"),
+                b"".join(stderr_chunks).decode("utf-8", errors="replace"),
+            )
+        if deadline is not None and time.monotonic() >= deadline:
+            channel.close()
+            raise SSHSkillError(f"Remote command timed out after {timeout} seconds")
+        time.sleep(0.05)
+
+
 def execute_direct(
     connection: ConnectionConfig,
     command: str,
     *,
-    config_path: Path,
     timeout: int,
     root: Path,
     save_name: str | None = None,
 ) -> dict[str, Any]:
-    client = connect_client(connection, config_path=config_path, timeout=timeout)
+    client = connect_client(connection, timeout=timeout)
     try:
         if save_name:
             save_project_profile(save_name, connection, root=root)
         stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
-        stdout_text = stdout.read().decode("utf-8", errors="replace")
-        stderr_text = stderr.read().decode("utf-8", errors="replace")
-        exit_code = stdout.channel.recv_exit_status()
+        exit_code, stdout_text, stderr_text = read_exec_result(stdout, stderr, timeout=timeout)
         return {
             "success": exit_code == 0,
             "exit_code": exit_code,
@@ -766,32 +690,137 @@ def execute_direct(
         close_ssh_client(client)
 
 
-def try_daemon_execute(alias: str, command: str, *, root: Path, timeout: int) -> dict[str, Any] | None:
-    info = read_daemon_info(alias, root)
+def connection_to_payload(connection: ConnectionConfig) -> dict[str, Any]:
+    return {
+        "target": connection.target,
+        "hostname": connection.hostname,
+        "username": connection.username,
+        "port": connection.port,
+        "password": connection.password,
+        "identity_file": connection.identity_file,
+        "source": connection.source,
+    }
+
+
+def connection_from_payload(payload: dict[str, Any]) -> ConnectionConfig:
+    hostname = payload.get("hostname")
+    username = payload.get("username")
+    port = payload.get("port", 22)
+    password = payload.get("password")
+    identity_file = payload.get("identity_file")
+    target = payload.get("target") or hostname
+    source = payload.get("source") or "direct"
+    if not isinstance(hostname, str) or not hostname.strip():
+        raise SSHSkillError("Daemon start file has an invalid hostname")
+    if not isinstance(username, str) or not username.strip():
+        raise SSHSkillError("Daemon start file has an invalid username")
+    if not isinstance(port, int) or isinstance(port, bool):
+        raise SSHSkillError("Daemon start file has an invalid port")
+    if password is not None and not isinstance(password, str):
+        raise SSHSkillError("Daemon start file has an invalid password")
+    if identity_file is not None and not isinstance(identity_file, str):
+        raise SSHSkillError("Daemon start file has an invalid identity_file")
+    if password and identity_file:
+        raise SSHSkillError("Daemon start file cannot contain both password and identity_file")
+    return ConnectionConfig(
+        target=str(target),
+        hostname=hostname.strip(),
+        username=username.strip(),
+        port=validate_port(port),
+        password=password,
+        identity_file=normalize_identity_file_path(identity_file) if identity_file else None,
+        source=str(source),
+    )
+
+
+def write_daemon_start_file(connection: ConnectionConfig, *, root: Path) -> Path:
+    directory = ensure_daemon_directory(root)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f"start-{daemon_id(daemon_key_for_connection(connection))}-",
+        suffix=".json",
+        dir=directory,
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        if os.name != "nt":
+            os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(connection_to_payload(connection), handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+    except Exception:
+        temporary_path.unlink(missing_ok=True)
+        raise
+    return temporary_path
+
+
+def read_daemon_start_file(path: Path) -> ConnectionConfig:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SSHSkillError(f"Unable to read daemon start file: {path}") from exc
+    finally:
+        path.unlink(missing_ok=True)
+    if not isinstance(payload, dict):
+        raise SSHSkillError(f"Invalid daemon start file: {path}")
+    return connection_from_payload(payload)
+
+
+def request_daemon(info: dict[str, Any], payload: dict[str, Any], *, timeout: int) -> dict[str, Any]:
+    with socket.create_connection(("127.0.0.1", int(info["port"])), timeout=5) as sock:
+        send_message(sock, payload)
+        return recv_message(sock, timeout=timeout)
+
+
+def live_daemon_info(key: str, root: Path) -> dict[str, Any] | None:
+    info = read_daemon_info(key, root)
     if not info:
         return None
     try:
-        with socket.create_connection(("127.0.0.1", int(info["port"])), timeout=5) as sock:
-            send_message(sock, {"action": "execute", "command": command, "timeout": timeout})
-            result = recv_message(sock, timeout=timeout + 5)
-            result["method"] = "daemon"
-            return result
+        payload = request_daemon(info, {"action": "ping"}, timeout=5)
+        if payload.get("key") != key:
+            daemon_info_path(key, root).unlink(missing_ok=True)
+            return None
+        return info
     except Exception:
+        daemon_info_path(key, root).unlink(missing_ok=True)
         return None
 
 
-def start_daemon_background(target: str, *, config_path: Path, root: Path, idle_timeout: int) -> bool:
+def try_daemon_execute(connection: ConnectionConfig, command: str, *, root: Path, timeout: int) -> dict[str, Any] | None:
+    key = daemon_key_for_connection(connection)
+    info = read_daemon_info(key, root)
+    if not info:
+        return None
+    try:
+        result = request_daemon(
+            info,
+            {"action": "execute", "command": command, "timeout": timeout},
+            timeout=timeout + 5,
+        )
+        result["method"] = "daemon"
+        return result
+    except Exception:
+        daemon_info_path(key, root).unlink(missing_ok=True)
+        return None
+
+
+def start_daemon_background(connection: ConnectionConfig, *, root: Path, idle_timeout: int) -> bool:
+    key = daemon_key_for_connection(connection)
+    if live_daemon_info(key, root):
+        return True
+    start_file = write_daemon_start_file(connection, root=root)
     script = Path(__file__).resolve()
     cmd = [
         sys.executable,
         str(script),
-        "--config",
-        str(config_path),
         "--root",
         str(root),
         "daemon",
         "start",
-        target,
+        "--start-file",
+        str(start_file),
         "--idle-timeout",
         str(idle_timeout),
     ]
@@ -799,16 +828,16 @@ def start_daemon_background(target: str, *, config_path: Path, root: Path, idle_
         subprocess.Popen(cmd, stdout=devnull, stderr=devnull, start_new_session=(os.name != "nt"))
     for _ in range(20):
         time.sleep(0.2)
-        if read_daemon_info(target, root):
+        if live_daemon_info(key, root):
             return True
+    start_file.unlink(missing_ok=True)
     return False
 
 
 class SSHDaemon:
-    def __init__(self, target: str, *, config_path: Path, root: Path, idle_timeout: int):
-        self.target = target
-        self.alias = target
-        self.config_path = config_path
+    def __init__(self, connection: ConnectionConfig, *, root: Path, idle_timeout: int):
+        self.connection = connection
+        self.key = daemon_key_for_connection(connection)
         self.root = root
         self.idle_timeout = idle_timeout
         self.last_activity = time.time()
@@ -823,15 +852,10 @@ class SSHDaemon:
         self.client_sockets_lock = threading.Lock()
 
     def start(self) -> None:
-        if read_daemon_info(self.target, self.root):
+        if live_daemon_info(self.key, self.root):
             return
         atexit.register(self.shutdown)
-        _connection, self.ssh_client = connect_target(
-            self.target,
-            config_path=self.config_path,
-            root=self.root,
-            timeout=30,
-        )
+        _connection, self.ssh_client = connect_target(self.connection, timeout=30)
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.server_socket.bind(("127.0.0.1", 0))
@@ -840,11 +864,14 @@ class SSHDaemon:
         port = self.server_socket.getsockname()[1]
         self.running = True
         write_daemon_info(
-            self.target,
+            self.key,
             {
+                "key": self.key,
                 "pid": os.getpid(),
                 "port": port,
-                "alias": self.target,
+                "hostname": self.connection.hostname,
+                "ssh_port": self.connection.port,
+                "username": self.connection.username,
                 "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                 "idle_timeout": self.idle_timeout,
             },
@@ -885,13 +912,26 @@ class SSHDaemon:
             if action == "execute":
                 self.last_activity = time.time()
                 command = str(request.get("command", ""))
-                timeout = int(request.get("timeout", 30))
+                timeout = int(
+                    validate_positive_int(int(request.get("timeout", 30)), "timeout") or 30
+                )
                 send_message(client_sock, self.execute(command, timeout))
                 return
-            send_message(client_sock, {"success": False, "exit_code": -1, "stdout": "", "stderr": f"Unknown action: {action}"})
+            send_message(
+                client_sock,
+                {
+                    "success": False,
+                    "exit_code": -1,
+                    "stdout": "",
+                    "stderr": f"Unknown action: {action}",
+                },
+            )
         except Exception as exc:
             try:
-                send_message(client_sock, {"success": False, "exit_code": -1, "stdout": "", "stderr": str(exc)})
+                send_message(
+                    client_sock,
+                    {"success": False, "exit_code": -1, "stdout": "", "stderr": str(exc)},
+                )
             except Exception:
                 pass
         finally:
@@ -906,7 +946,10 @@ class SSHDaemon:
         return {
             "status": "running",
             "pid": os.getpid(),
-            "alias": self.target,
+            "key": self.key,
+            "hostname": self.connection.hostname,
+            "port": self.connection.port,
+            "username": self.connection.username,
             "ssh_alive": self.is_ssh_alive(),
             "uptime_seconds": int(time.time() - self.started_at),
             "idle_seconds": int(time.time() - self.last_activity),
@@ -918,19 +961,12 @@ class SSHDaemon:
                 try:
                     if self.ssh_client:
                         close_ssh_client(self.ssh_client)
-                    _connection, self.ssh_client = connect_target(
-                        self.target,
-                        config_path=self.config_path,
-                        root=self.root,
-                        timeout=timeout,
-                    )
+                    _connection, self.ssh_client = connect_target(self.connection, timeout=timeout)
                 except Exception as exc:
                     return {"success": False, "exit_code": -1, "stdout": "", "stderr": f"Reconnect failed: {exc}"}
             try:
                 stdin, stdout, stderr = self.ssh_client.exec_command(command, timeout=timeout)
-                stdout_text = stdout.read().decode("utf-8", errors="replace")
-                stderr_text = stderr.read().decode("utf-8", errors="replace")
-                exit_code = stdout.channel.recv_exit_status()
+                exit_code, stdout_text, stderr_text = read_exec_result(stdout, stderr, timeout=timeout)
                 return {
                     "success": exit_code == 0,
                     "exit_code": exit_code,
@@ -967,12 +1003,7 @@ class SSHDaemon:
                 try:
                     if self.ssh_client:
                         close_ssh_client(self.ssh_client)
-                    _connection, self.ssh_client = connect_target(
-                        self.target,
-                        config_path=self.config_path,
-                        root=self.root,
-                        timeout=30,
-                    )
+                    _connection, self.ssh_client = connect_target(self.connection, timeout=30)
                 except Exception:
                     pass
 
@@ -1024,51 +1055,82 @@ class SSHDaemon:
             if thread is current:
                 continue
             thread.join(timeout=2)
-        daemon_info_path(self.target, self.root).unlink(missing_ok=True)
+        daemon_info_path(self.key, self.root).unlink(missing_ok=True)
 
 
-def daemon_status(alias: str, *, root: Path) -> dict[str, Any]:
-    info = read_daemon_info(alias, root)
+def daemon_status(connection: ConnectionConfig, *, root: Path) -> dict[str, Any]:
+    key = daemon_key_for_connection(connection)
+    info = read_daemon_info(key, root)
     if not info:
-        return {"status": "not_running", "alias": alias}
+        return {
+            "status": "not_running",
+            "key": key,
+            "hostname": connection.hostname,
+            "port": connection.port,
+            "username": connection.username,
+        }
     try:
-        with socket.create_connection(("127.0.0.1", int(info["port"])), timeout=5) as sock:
-            send_message(sock, {"action": "ping"})
-            payload = recv_message(sock, timeout=5)
-            payload["alias"] = alias
-            return payload
+        payload = request_daemon(info, {"action": "ping"}, timeout=5)
+        payload["key"] = key
+        return payload
     except Exception as exc:
-        return {"status": "unreachable", "alias": alias, "error": str(exc)}
+        daemon_info_path(key, root).unlink(missing_ok=True)
+        return {
+            "status": "unreachable",
+            "key": key,
+            "hostname": connection.hostname,
+            "port": connection.port,
+            "username": connection.username,
+            "error": str(exc),
+        }
 
 
-def daemon_stop(alias: str, *, root: Path) -> dict[str, Any]:
-    info = read_daemon_info(alias, root)
+def daemon_stop(connection: ConnectionConfig, *, root: Path) -> dict[str, Any]:
+    key = daemon_key_for_connection(connection)
+    info = read_daemon_info(key, root)
     if not info:
-        return {"status": "not_running", "alias": alias}
+        return {
+            "status": "not_running",
+            "key": key,
+            "hostname": connection.hostname,
+            "port": connection.port,
+            "username": connection.username,
+        }
     try:
-        with socket.create_connection(("127.0.0.1", int(info["port"])), timeout=5) as sock:
-            send_message(sock, {"action": "shutdown"})
-            payload = recv_message(sock, timeout=5)
+        payload = request_daemon(info, {"action": "shutdown"}, timeout=5)
         for _ in range(20):
-            if not read_daemon_info(alias, root):
+            if not read_daemon_info(key, root):
                 break
             time.sleep(0.05)
-        daemon_info_path(alias, root).unlink(missing_ok=True)
-        return {"status": "stopped", "alias": alias, **payload}
+        daemon_info_path(key, root).unlink(missing_ok=True)
+        return {
+            **payload,
+            "status": "stopped",
+            "key": key,
+            "hostname": connection.hostname,
+            "port": connection.port,
+            "username": connection.username,
+        }
     except Exception as exc:
-        daemon_info_path(alias, root).unlink(missing_ok=True)
-        return {"status": "force_cleaned", "alias": alias, "error": str(exc)}
+        daemon_info_path(key, root).unlink(missing_ok=True)
+        return {
+            "status": "force_cleaned",
+            "key": key,
+            "hostname": connection.hostname,
+            "port": connection.port,
+            "username": connection.username,
+            "error": str(exc),
+        }
 
 
 def sftp_connect(
     connection: ConnectionConfig,
     *,
-    config_path: Path,
     timeout: int,
     root: Path,
     save_name: str | None = None,
 ):
-    client = connect_client(connection, config_path=config_path, timeout=timeout)
+    client = connect_client(connection, timeout=timeout)
     try:
         if save_name:
             save_project_profile(save_name, connection, root=root)
@@ -1122,7 +1184,6 @@ def upload_path(
     local_path: Path,
     remote_path: str,
     *,
-    config_path: Path,
     root: Path,
     recursive: bool,
     no_progress: bool,
@@ -1132,7 +1193,6 @@ def upload_path(
         raise SSHSkillError(f"Local path not found: {local_path}")
     client, sftp = sftp_connect(
         connection,
-        config_path=config_path,
         timeout=30,
         root=root,
         save_name=save_name,
@@ -1178,7 +1238,6 @@ def download_path(
     remote_path: str,
     local_path: Path,
     *,
-    config_path: Path,
     root: Path,
     recursive: bool,
     no_progress: bool,
@@ -1186,7 +1245,6 @@ def download_path(
 ) -> dict[str, Any]:
     client, sftp = sftp_connect(
         connection,
-        config_path=config_path,
         timeout=30,
         root=root,
         save_name=save_name,
@@ -1444,7 +1502,6 @@ def run_interactive(
     *,
     command: str | None,
     shell_mode: bool,
-    config_path: Path,
     connect_timeout: int,
     session_timeout: int | None,
     term: str,
@@ -1485,7 +1542,7 @@ def run_interactive(
 
     try:
         log_handle = open_interactive_log(log_path, append=append_log, overwrite=overwrite_log)
-        client = connect_client(connection, config_path=config_path, timeout=connect_timeout)
+        client = connect_client(connection, timeout=connect_timeout)
         initial_rows, initial_cols = current_terminal_size(rows, cols)
         if shell_mode:
             channel = client.invoke_shell(
@@ -1540,10 +1597,11 @@ def command_from_remainder(parts: list[str]) -> str:
 
 
 def _connection_options_from_args(args: argparse.Namespace) -> ConnectionOptions:
+    identity_file = getattr(args, "identity_file", None)
     return ConnectionOptions(
         username=getattr(args, "username", None),
         password=getattr(args, "password", None),
-        password_stdin=bool(getattr(args, "password_stdin", False)),
+        identity_file=str(identity_file) if identity_file is not None else None,
         port=getattr(args, "port", None),
         save=bool(getattr(args, "save", False)),
         save_as=getattr(args, "save_as", None),
@@ -1589,7 +1647,12 @@ def normalize_exec_args(
             index += 1
             continue
         if part == "--password-stdin":
-            options.password_stdin = True
+            raise SSHSkillError("--password-stdin has been removed; use --password or a saved profile")
+        if part == "--identity-file":
+            options.identity_file, index = _value_after_option(command_parts, index, part)
+            continue
+        if part.startswith("--identity-file="):
+            options.identity_file = part.split("=", 1)[1]
             index += 1
             continue
         if part == "--port":
@@ -1637,7 +1700,7 @@ def normalize_exec_args(
         break
     return (
         command_from_remainder(normalized_parts),
-        timeout,
+        int(validate_positive_int(timeout, "--timeout") or 30),
         no_daemon,
         prepare_connection_options(options),
     )
@@ -1694,7 +1757,12 @@ def normalize_interactive_args(
             index += 1
             continue
         if part == "--password-stdin":
-            args.password_stdin = True
+            raise SSHSkillError("--password-stdin has been removed; use --password or a saved profile")
+        if part == "--identity-file":
+            args.identity_file, index = _value_after_option(local_parts, index, part)
+            continue
+        if part.startswith("--identity-file="):
+            args.identity_file = part.split("=", 1)[1]
             index += 1
             continue
         if part == "--port":
@@ -1798,18 +1866,14 @@ def add_connection_arguments(parser: argparse.ArgumentParser) -> None:
         "--password",
         help="SSH password (may be exposed in shell history and process listings)",
     )
-    parser.add_argument(
-        "--password-stdin",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
+    parser.add_argument("--identity-file", help="Private key file path")
     parser.add_argument("--port", type=int, help="SSH port")
     parser.add_argument(
         "--save",
         action="store_true",
-        help="Save the successfully authenticated username/password in the current project",
+        help="Save the successfully authenticated connection as a project profile",
     )
-    parser.add_argument("--save-as", help="Project credential profile name; requires --save")
+    parser.add_argument("--save-as", help="Project profile name; requires --save")
 
 
 def add_interactive_connection_arguments(parser: argparse.ArgumentParser) -> None:
@@ -1818,23 +1882,23 @@ def add_interactive_connection_arguments(parser: argparse.ArgumentParser) -> Non
         "--password",
         help="SSH password (may be exposed in shell history and process listings)",
     )
-    parser.add_argument(
-        "--password-stdin",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
+    parser.add_argument("--identity-file", help="Private key file path")
+    parser.add_argument("--port", type=int, help="SSH port")
+
+
+def add_control_identity_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--username", help="SSH username for direct daemon lookup")
     parser.add_argument("--port", type=int, help="SSH port")
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="SSH skill CLI")
-    parser.add_argument("--config", type=Path, default=default_config_path(), help="SSH config path")
     parser.add_argument("--root", type=Path, default=Path.cwd(), help="Project root for daemon state")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    subparsers.add_parser("list", help="List project credential profiles and SSH Host aliases")
+    subparsers.add_parser("list", help="List saved SSH profiles")
 
-    find_parser = subparsers.add_parser("find", help="Find SSH Host aliases")
+    find_parser = subparsers.add_parser("find", help="Find saved SSH profiles")
     find_parser.add_argument("keyword")
 
     test_parser = subparsers.add_parser("test", help="Test an SSH connection")
@@ -1885,21 +1949,22 @@ def build_parser() -> argparse.ArgumentParser:
     download_parser.add_argument("--no-progress", action="store_true")
     add_connection_arguments(download_parser)
 
-    credentials_parser = subparsers.add_parser(
-        "credentials",
-        help="List or remove project SSH credential profiles",
+    profiles_parser = subparsers.add_parser(
+        "profiles",
+        help="List or remove saved SSH profiles",
     )
-    credentials_parser.add_argument("action", choices=["list", "remove"])
-    credentials_parser.add_argument("name", nargs="?")
+    profiles_parser.add_argument("action", choices=["list", "remove"])
+    profiles_parser.add_argument("name", nargs="?")
 
     control_parser = subparsers.add_parser("control", help="Manage the daemon")
     control_parser.add_argument("action", choices=["status", "stop"])
-    control_parser.add_argument("alias")
+    control_parser.add_argument("target")
+    add_control_identity_arguments(control_parser)
 
     daemon_parser = subparsers.add_parser("daemon", help=argparse.SUPPRESS)
     daemon_subparsers = daemon_parser.add_subparsers(dest="daemon_command", required=True)
     start_parser = daemon_subparsers.add_parser("start")
-    start_parser.add_argument("alias")
+    start_parser.add_argument("--start-file", type=Path, required=True)
     start_parser.add_argument("--idle-timeout", type=int, default=IDLE_TIMEOUT_SECONDS)
 
     return parser
@@ -1916,14 +1981,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     args = parser.parse_args(raw_argv)
-    config_path = Path(args.config).expanduser()
     root = Path(args.root).resolve()
     secret_values: set[str] = set()
 
     try:
         try:
             secret_values.update(
-                profile.password for profile in load_project_profiles(root).values()
+                profile.password for profile in load_project_profiles(root).values() if profile.password
             )
         except SSHSkillError:
             pass
@@ -1932,7 +1996,7 @@ def main(argv: list[str] | None = None) -> int:
                 {
                     "success": True,
                     "operation": "list",
-                    "targets": list_targets(config_path=config_path, root=root),
+                    "targets": list_targets(root=root),
                 }
             )
             return 0
@@ -1942,18 +2006,18 @@ def main(argv: list[str] | None = None) -> int:
                     "success": True,
                     "operation": "find",
                     "keyword": args.keyword,
-                    "targets": find_targets(args.keyword, config_path=config_path, root=root),
+                    "targets": find_targets(args.keyword, root=root),
                 }
             )
             return 0
-        if args.command == "credentials":
+        if args.command == "profiles":
             if args.action == "list":
                 if args.name is not None:
-                    raise SSHSkillError("credentials list does not accept a profile name")
+                    raise SSHSkillError("profiles list does not accept a profile name")
                 json_print(
                     {
                         "success": True,
-                        "operation": "credentials_list",
+                        "operation": "profiles_list",
                         "profiles": [
                             profile.as_dict()
                             for profile in sorted(
@@ -1965,9 +2029,9 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 return 0
             if not args.name:
-                raise SSHSkillError("credentials remove requires a profile name")
+                raise SSHSkillError("profiles remove requires a profile name")
             result = remove_project_profile(args.name, root=root)
-            result["operation"] = "credentials_remove"
+            result["operation"] = "profiles_remove"
             json_print(result)
             return 0 if result["removed"] else 1
         if args.command == "test":
@@ -1976,14 +2040,16 @@ def main(argv: list[str] | None = None) -> int:
                 secret_values.add(options.password)
             connection = resolve_connection(
                 args.target,
-                config_path=config_path,
                 root=root,
                 options=options,
+                require_auth=True,
             )
             if connection.password:
                 secret_values.add(connection.password)
+            validate_connection_auth_files(connection)
             ensure_paramiko()
-            client = connect_client(connection, config_path=config_path, timeout=args.timeout)
+            timeout = int(validate_positive_int(args.timeout, "--timeout") or 30)
+            client = connect_client(connection, timeout=timeout)
             try:
                 if options.save:
                     save_project_profile(options.save_as or args.target, connection, root=root)
@@ -2004,33 +2070,51 @@ def main(argv: list[str] | None = None) -> int:
                 secret_values.add(options.password)
             connection = resolve_connection(
                 args.target,
-                config_path=config_path,
                 root=root,
                 options=options,
+                require_auth=no_daemon,
             )
             if connection.password:
                 secret_values.add(connection.password)
-            ensure_paramiko()
             result = None
-            use_daemon = not (
-                no_daemon
-                or options.has_explicit_connection_values()
-                or options.save
-            )
-            if use_daemon:
-                result = try_daemon_execute(args.target, command, root=root, timeout=timeout)
-                if result is None and start_daemon_background(
-                    args.target,
-                    config_path=config_path,
-                    root=root,
-                    idle_timeout=IDLE_TIMEOUT_SECONDS,
-                ):
-                    result = try_daemon_execute(args.target, command, root=root, timeout=timeout)
+            if no_daemon:
+                validate_connection_auth_files(connection)
+            if not no_daemon:
+                result = try_daemon_execute(connection, command, root=root, timeout=timeout)
+                if result is not None and options.save:
+                    save_project_profile(options.save_as or args.target, connection, root=root, stop_daemons=False)
+                if result is None:
+                    if not connection.has_auth():
+                        raise SSHSkillError(
+                            f"No matching daemon for {connection.username}@{connection.hostname}:{connection.port}; "
+                            "provide --password, --identity-file, or use a saved profile"
+                        )
+                    validate_connection_auth_files(connection)
+                    ensure_paramiko()
+                    if start_daemon_background(
+                        connection,
+                        root=root,
+                        idle_timeout=IDLE_TIMEOUT_SECONDS,
+                    ):
+                        if options.save:
+                            save_project_profile(
+                                options.save_as or args.target,
+                                connection,
+                                root=root,
+                                stop_daemons=False,
+                            )
+                        result = try_daemon_execute(connection, command, root=root, timeout=timeout)
             if result is None:
+                if not connection.has_auth():
+                    raise SSHSkillError(
+                        f"No matching daemon for {connection.username}@{connection.hostname}:{connection.port}; "
+                        "provide --password, --identity-file, or use a saved profile"
+                    )
+                validate_connection_auth_files(connection)
+                ensure_paramiko()
                 result = execute_direct(
                     connection,
                     command,
-                    config_path=config_path,
                     timeout=timeout,
                     root=root,
                     save_name=(options.save_as or args.target) if options.save else None,
@@ -2069,18 +2153,18 @@ def main(argv: list[str] | None = None) -> int:
                 term = "xterm-256color"
             connection = resolve_connection(
                 args.target,
-                config_path=config_path,
                 root=root,
                 options=options,
+                require_auth=True,
             )
             if connection.password:
                 secret_values.add(connection.password)
+            validate_connection_auth_files(connection)
             ensure_paramiko()
             return run_interactive(
                 connection,
                 command=command,
                 shell_mode=shell_mode,
-                config_path=config_path,
                 connect_timeout=int(connect_timeout or 30),
                 session_timeout=session_timeout,
                 term=term,
@@ -2098,18 +2182,18 @@ def main(argv: list[str] | None = None) -> int:
                 secret_values.add(options.password)
             connection = resolve_connection(
                 args.target,
-                config_path=config_path,
                 root=root,
                 options=options,
+                require_auth=True,
             )
             if connection.password:
                 secret_values.add(connection.password)
+            validate_connection_auth_files(connection)
             ensure_paramiko()
             result = upload_path(
                 connection,
                 args.local_path,
                 args.remote_path,
-                config_path=config_path,
                 root=root,
                 recursive=args.recursive,
                 no_progress=args.no_progress,
@@ -2123,18 +2207,18 @@ def main(argv: list[str] | None = None) -> int:
                 secret_values.add(options.password)
             connection = resolve_connection(
                 args.target,
-                config_path=config_path,
                 root=root,
                 options=options,
+                require_auth=True,
             )
             if connection.password:
                 secret_values.add(connection.password)
+            validate_connection_auth_files(connection)
             ensure_paramiko()
             result = download_path(
                 connection,
                 args.remote_path,
                 args.local_path,
-                config_path=config_path,
                 root=root,
                 recursive=args.recursive,
                 no_progress=args.no_progress,
@@ -2143,14 +2227,25 @@ def main(argv: list[str] | None = None) -> int:
             json_print(result)
             return 0
         if args.command == "control":
-            payload = daemon_status(args.alias, root=root) if args.action == "status" else daemon_stop(args.alias, root=root)
+            connection = resolve_control_connection(
+                args.target,
+                root=root,
+                username=args.username,
+                port=args.port,
+            )
+            payload = daemon_status(connection, root=root) if args.action == "status" else daemon_stop(connection, root=root)
             payload["success"] = payload.get("status") != "unreachable"
             payload["operation"] = f"control_{args.action}"
             json_print(payload)
             return 0
         if args.command == "daemon" and args.daemon_command == "start":
+            connection = read_daemon_start_file(args.start_file)
+            if connection.password:
+                secret_values.add(connection.password)
+            validate_connection_auth_files(connection)
             ensure_paramiko()
-            daemon = SSHDaemon(args.alias, config_path=config_path, root=root, idle_timeout=args.idle_timeout)
+            idle_timeout = int(validate_positive_int(args.idle_timeout, "--idle-timeout") or IDLE_TIMEOUT_SECONDS)
+            daemon = SSHDaemon(connection, root=root, idle_timeout=idle_timeout)
             daemon.start()
             return 0
     except DependencyError as exc:
