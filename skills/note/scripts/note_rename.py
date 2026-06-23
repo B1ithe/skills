@@ -8,17 +8,17 @@ import json
 import os
 import sys
 from pathlib import Path, PurePosixPath
-from urllib.parse import quote
 
+from note_markdown import (
+    encode_markdown_path,
+    replace_local_markdown_targets,
+    replace_wikilinks,
+)
+from note_sources import update_frontmatter_sources
 from note_common import (
-    MARKDOWN_IMAGE_RE,
-    MARKDOWN_LINK_RE,
-    WIKILINK_RE,
     dump_frontmatter,
     is_ignored_vault_path,
-    is_local_target,
     maintained_notes,
-    normalize_link_target,
     path_part_errors,
     relative_posix,
     replace_outside_fences,
@@ -243,89 +243,32 @@ def note_link_maps(path_updates: dict[str, str]) -> tuple[dict[str, str], dict[s
     return target_updates, asset_updates
 
 
-def replace_wikilinks(line: str, target_updates: dict[str, str]) -> str:
-    def replace(match) -> str:
-        target = match.group(1)
-        heading = match.group(2) or ""
-        alias = match.group(3) or ""
-        new_target = target_updates.get(target.removesuffix(".md"), target)
-        return f"[[{new_target}{heading}{alias}]]"
-
-    return WIKILINK_RE.sub(replace, line)
-
-
-def split_raw_target(raw_target: str) -> tuple[bool, str, str]:
-    if raw_target.startswith("<") and ">" in raw_target:
-        end = raw_target.index(">")
-        return True, raw_target[1:end], raw_target[end + 1 :]
-
-    token = raw_target.split(maxsplit=1)[0]
-    return False, token, raw_target[len(token) :]
-
-
-def encode_markdown_target(target: str) -> str:
-    return quote(target, safe="./")
-
-
 def relative_markdown_target(vault: Path, note_path: Path, vault_relative: str) -> str:
     absolute = vault.joinpath(*PurePosixPath(vault_relative).parts)
     relative = Path(os.path.relpath(absolute, note_path.parent)).as_posix()
     if not relative.startswith("."):
         relative = f"./{relative}"
-    return encode_markdown_target(relative)
+    return encode_markdown_path(relative)
 
 
 def remap_markdown_target(
-    raw_target: str,
+    target,
     vault: Path,
     note_path: Path,
     path_updates: dict[str, str],
-) -> str:
-    if not is_local_target(raw_target.strip()):
-        return raw_target
-
-    decoded_path = normalize_link_target(raw_target)
-    if not decoded_path:
-        return raw_target
-
+) -> str | None:
     try:
-        current = (note_path.parent / decoded_path).resolve()
+        current = (note_path.parent / target.path).resolve()
         current_relative = current.relative_to(vault).as_posix()
     except ValueError:
-        return raw_target
+        return None
 
     updated_relative = path_updates.get(current_relative)
     if updated_relative is None:
-        return raw_target
+        return None
 
-    angled, token, suffix = split_raw_target(raw_target)
-    fragment = ""
-    if "#" in token:
-        _, fragment_value = token.split("#", 1)
-        fragment = f"#{fragment_value}"
-
-    updated = relative_markdown_target(vault, note_path, updated_relative) + fragment
-    if angled:
-        return f"<{updated}>{suffix}"
-    return f"{updated}{suffix}"
-
-
-def replace_markdown_links(
-    line: str,
-    vault: Path,
-    note_path: Path,
-    path_updates: dict[str, str],
-) -> str:
-    def replace(match) -> str:
-        updated = remap_markdown_target(match.group(1), vault, note_path, path_updates)
-        if updated == match.group(1):
-            return match.group(0)
-        start = match.start(1) - match.start(0)
-        end = match.end(1) - match.start(0)
-        return match.group(0)[:start] + updated + match.group(0)[end:]
-
-    line = MARKDOWN_IMAGE_RE.sub(replace, line)
-    return MARKDOWN_LINK_RE.sub(replace, line)
+    updated = relative_markdown_target(vault, note_path, updated_relative)
+    return target.with_path(updated)
 
 
 def update_asset_links(line: str, old_stem: str, new_stem: str) -> str:
@@ -338,45 +281,59 @@ def update_asset_links(line: str, old_stem: str, new_stem: str) -> str:
     )
 
 
-def update_sources(fields: dict[str, object], path_updates: dict[str, str]) -> bool:
-    changed = False
-    sources = fields.get("sources")
-    if not isinstance(sources, list):
-        return False
-    for source in sources:
-        if not isinstance(source, dict):
-            continue
-        source_path = source.get("path")
-        if isinstance(source_path, str) and source_path in path_updates:
-            source["path"] = path_updates[source_path]
-            changed = True
-    return changed
+def preflight_renames(vault: Path, renames: list[dict[str, object]]) -> None:
+    completed: list[tuple[str, str]] = []
+    targets: set[str] = set()
+    for operation in sorted(
+        renames,
+        key=lambda item: len(PurePosixPath(str(item["path"])).parts),
+    ):
+        old = str(operation["path"])
+        new = str(operation["new_path"])
+        current = remap_completed(old, completed)
+        source = vault.joinpath(*PurePosixPath(current).parts)
+        target = vault.joinpath(*PurePosixPath(new).parts)
+        if not source.exists():
+            raise RenameError(f"planned source no longer exists: {current}")
+        if new in targets or target.exists():
+            raise RenameError(f"planned target already exists: {new}")
+        targets.add(new)
+        completed.append((old, new))
 
 
-def update_note_contents(vault: Path, path_updates: dict[str, str]) -> list[str]:
+def prepare_note_updates(vault: Path, path_updates: dict[str, str]) -> list[tuple[Path, str]]:
     target_updates, asset_updates = note_link_maps(path_updates)
-    changed: list[str] = []
+    updates: list[tuple[Path, str]] = []
     for path in maintained_notes(vault):
         rel = path.relative_to(vault).as_posix()
-        text = path.read_text(encoding="utf-8")
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            raise RenameError(f"{rel}: maintained notes must use UTF-8") from exc
         fields, body, errors = split_frontmatter(text)
         original_frontmatter = ""
         frontmatter_changed = False
         if not errors:
             original_frontmatter = text[: len(text) - len(body)]
-            frontmatter_changed = update_sources(fields, path_updates)
+            frontmatter_changed = update_frontmatter_sources(fields, path_updates)
         else:
             body = text
 
-        def replace_line(line: str) -> str:
-            updated = replace_wikilinks(line, target_updates)
-            updated = replace_markdown_links(updated, vault, path, path_updates)
-            asset_update = asset_updates.get(rel)
-            if asset_update is not None:
-                updated = update_asset_links(updated, *asset_update)
-            return updated
+        new_body = replace_wikilinks(
+            body,
+            lambda target: target_updates.get(target.normalized),
+        )
+        new_body = replace_local_markdown_targets(
+            new_body,
+            lambda target: remap_markdown_target(target, vault, path, path_updates),
+        )
 
-        new_body = replace_outside_fences(body, replace_line)
+        asset_update = asset_updates.get(rel)
+        if asset_update is not None:
+            new_body = replace_outside_fences(
+                new_body,
+                lambda line: update_asset_links(line, *asset_update),
+            )
         if errors:
             new_text = new_body
         elif frontmatter_changed:
@@ -385,8 +342,15 @@ def update_note_contents(vault: Path, path_updates: dict[str, str]) -> list[str]
             new_text = original_frontmatter + new_body
 
         if frontmatter_changed or new_body != body:
-            path.write_text(new_text, encoding="utf-8")
-            changed.append(rel)
+            updates.append((path, new_text))
+    return updates
+
+
+def write_note_updates(updates: list[tuple[Path, str]], vault: Path) -> list[str]:
+    changed: list[str] = []
+    for path, text in updates:
+        path.write_text(text, encoding="utf-8")
+        changed.append(relative_posix(path, vault))
     return changed
 
 
@@ -404,8 +368,10 @@ def apply(root: Path, plan_path: Path) -> dict[str, object]:
         for old, new in raw_updates.items()
         if isinstance(old, str) and isinstance(new, str)
     }
+    preflight_renames(vault, renames)
+    note_updates = prepare_note_updates(vault, path_updates)
     apply_renames(vault, renames)
-    changed_notes = update_note_contents(vault, path_updates)
+    changed_notes = write_note_updates(note_updates, vault)
     return {
         "renamed": len(renames),
         "updated_notes": changed_notes,

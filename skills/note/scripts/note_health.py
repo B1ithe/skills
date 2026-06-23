@@ -8,20 +8,16 @@ import os
 import sys
 from pathlib import Path, PurePosixPath
 
+from note_markdown import local_markdown_targets, wikilink_targets
+from note_sources import source_health_errors
 from note_common import (
     REQUIRED_FIELDS,
     SHA256_RE,
-    WIKILINK_RE,
-    image_target,
-    is_local_target,
     is_ignored_vault_path,
     iter_vault_paths,
-    local_attachment_targets,
     maintained_notes,
-    normalize_link_target,
     parse_frontmatter,
     path_part_errors,
-    prose_text,
     relative_posix,
     valid_date,
     vault_root,
@@ -107,39 +103,6 @@ def check_frontmatter(path: Path) -> tuple[list[str], list[str]]:
     return errors, advisories
 
 
-def source_registry(files: list[Path]) -> dict[str, list[Path]]:
-    registry: dict[str, list[Path]] = {}
-    for path in files:
-        fields, parse_errors = parse_frontmatter(path.read_text(encoding="utf-8"))
-        if parse_errors:
-            continue
-        sources = fields.get("sources")
-        if not isinstance(sources, list):
-            continue
-        for source in sources:
-            if not isinstance(source, dict):
-                continue
-            source_path = source.get("path")
-            if isinstance(source_path, str) and source_path:
-                registry.setdefault(source_path, []).append(path)
-    return registry
-
-
-def check_source_registry(
-    files: list[Path],
-    vault: Path | None = None,
-) -> list[str]:
-    vault = vault or VAULT
-    errors: list[str] = []
-    for source_path, paths in sorted(source_registry(files).items()):
-        if len(paths) > 1:
-            relative_paths = ", ".join(relative_posix(path, vault) for path in paths)
-            errors.append(
-                f"duplicate source path {source_path}: {relative_paths}"
-            )
-    return errors
-
-
 def note_targets(files: list[Path], vault: Path | None = None) -> set[str]:
     vault = vault or VAULT
     targets: set[str] = set()
@@ -155,21 +118,16 @@ def note_targets(files: list[Path], vault: Path | None = None) -> set[str]:
     return targets
 
 
-def outgoing_links(path: Path) -> set[str]:
-    text = prose_text(path.read_text(encoding="utf-8"))
-    return {match[0].strip() for match in WIKILINK_RE.findall(text)}
-
-
 def check_links(files: list[Path], vault: Path | None = None) -> list[str]:
     vault = vault or VAULT
     errors: list[str] = []
     targets = note_targets(files, vault)
     for path in files:
-        for link in sorted(outgoing_links(path)):
-            normalized = link.removesuffix(".md").removeprefix("./")
-            if normalized not in targets:
+        text = path.read_text(encoding="utf-8")
+        for link in sorted(wikilink_targets(text), key=lambda item: item.target):
+            if link.normalized not in targets:
                 relative = path.relative_to(vault)
-                errors.append(f"{relative}: broken internal link [[{link}]]")
+                errors.append(f"{relative}: broken internal link [[{link.target}]]")
     return errors
 
 
@@ -196,25 +154,19 @@ def check_attachments(files: list[Path], vault: Path | None = None) -> list[str]
     for path in files:
         text = path.read_text(encoding="utf-8")
         expected_root = (path.parent / "assets" / path.stem).resolve()
-        for match in sorted(local_attachment_targets(text)):
-            target = image_target(match)
-            if not is_local_target(target):
-                continue
-            target = normalize_link_target(target)
-            if not target:
-                continue
-            candidate = (path.parent / target).resolve()
+        for target in sorted(local_markdown_targets(text), key=lambda item: item.path):
+            candidate = (path.parent / target.path).resolve()
             relative = path.relative_to(vault)
             try:
                 candidate.relative_to(expected_root)
             except ValueError:
                 errors.append(
                     f"{relative}: attachment must be under "
-                    f"./assets/{path.stem}/: {target}"
+                    f"./assets/{path.stem}/: {target.path}"
                 )
                 continue
             if not candidate.is_file():
-                errors.append(f"{relative}: missing attachment {target}")
+                errors.append(f"{relative}: missing attachment {target.path}")
     return errors
 
 
@@ -271,7 +223,7 @@ def collect_report(vault: Path) -> tuple[list[str], list[str]]:
         for advisory in frontmatter_advisories:
             advisories.append(f"{relative}: {advisory}")
 
-    errors.extend(check_source_registry(files, vault))
+    errors.extend(source_health_errors(vault))
     errors.extend(check_duplicate_filenames(files, vault))
     errors.extend(check_links(files, vault))
     errors.extend(check_attachments(files, vault))

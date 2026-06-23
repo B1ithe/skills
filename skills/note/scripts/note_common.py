@@ -3,7 +3,6 @@ from __future__ import annotations
 import datetime as dt
 import re
 from pathlib import Path, PurePosixPath
-from urllib.parse import unquote
 
 try:
     import yaml
@@ -27,8 +26,6 @@ class NoAliasSafeDumper(yaml.SafeDumper):
 REQUIRED_FIELDS = {"title", "created", "updated", "tags", "sources"}
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 FENCE_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})")
-MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
-MARKDOWN_LINK_RE = re.compile(r"(?<!!)\[[^\]]+\]\(([^)]+)\)")
 WIKILINK_RE = re.compile(
     r"(?<!!)\[\[([^\]|#]+)(#[^\]|]*)?(\|[^\]]*)?\]\]"
 )
@@ -137,25 +134,6 @@ def valid_date(value: object) -> bool:
     return bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", value))
 
 
-def prose_text(text: str) -> str:
-    output: list[str] = []
-    fence: str | None = None
-    for line in text.splitlines(keepends=True):
-        match = FENCE_RE.match(line)
-        if fence is None:
-            if match:
-                fence = match.group(1)
-                output.append("\n")
-            else:
-                output.append(line)
-            continue
-
-        if re.match(rf"^[ \t]*{re.escape(fence[0])}{{{len(fence)},}}[ \t]*$", line):
-            fence = None
-        output.append("\n")
-    return "".join(output)
-
-
 def replace_outside_fences(text: str, replace_line) -> str:
     output: list[str] = []
     fence: str | None = None
@@ -173,28 +151,6 @@ def replace_outside_fences(text: str, replace_line) -> str:
         if re.match(rf"^[ \t]*{re.escape(fence[0])}{{{len(fence)},}}[ \t]*$", line):
             fence = None
     return "".join(output)
-
-
-def image_target(raw_target: str) -> str:
-    value = raw_target.strip()
-    if value.startswith("<") and ">" in value:
-        return value[1 : value.index(">")]
-    return value.split(maxsplit=1)[0]
-
-
-def local_attachment_targets(text: str) -> set[str]:
-    prose = prose_text(text)
-    targets = set(MARKDOWN_IMAGE_RE.findall(prose))
-    targets.update(MARKDOWN_LINK_RE.findall(prose))
-    return targets
-
-
-def is_local_target(target: str) -> bool:
-    return not target.startswith(IGNORED_LOCAL_SCHEMES)
-
-
-def normalize_link_target(target: str) -> str:
-    return unquote(image_target(target).split("#", 1)[0])
 
 
 def path_part_errors(name: str) -> list[str]:

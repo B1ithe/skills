@@ -78,7 +78,8 @@ python <skill-dir>/scripts/source_inventory.py --root "$PWD" --json
 ```
 
 Process only `new` or `changed` items unless the user asks for a rebuild.
-Resolve `duplicate` registrations before ingesting more sources.
+Resolve `missing`, `changed`, and `duplicate` source statuses before committing
+note updates; they are health blockers.
 
 ## Update
 

@@ -134,7 +134,7 @@ Windows. `.obsidian/` is excluded from filename checks and repairs.
 Health checks machine-verifiable note structure only:
 
 - valid existing frontmatter and required field types.
-- source path and SHA-256 format.
+- source path format, existence, and registered SHA-256 match.
 - duplicate source registrations.
 - broken internal links.
 - duplicate Markdown filename stems.
