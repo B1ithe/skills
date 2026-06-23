@@ -1,0 +1,4 @@
+interface:
+  display_name: "Note"
+  short_description: "Maintain, check, and repair a local Markdown and Obsidian note vault"
+  default_prompt: "Use $note to update, answer from, format, check, plan fixes for, or repair my note vault in Chinese."
