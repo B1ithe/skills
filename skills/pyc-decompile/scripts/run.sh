@@ -263,6 +263,7 @@ cmd_decompile() {
     docker run --rm \
       -v "$staging:/input:ro" \
       -v "$eng_output:/output" \
+      -v "$ENGINES_DIR/$engine/decompile.sh:/decompile.sh:ro" \
       "$img" /input /output \
       > "$result" 2>&1 || true
 
@@ -272,7 +273,6 @@ cmd_decompile() {
     while IFS= read -r line; do
       case "$line" in
         "OK: "*)
-          ok=$((ok + 1))
           local ok_rel="${line#OK: }"
           local py_out
           case "$ok_rel" in
@@ -287,6 +287,9 @@ cmd_decompile() {
               *)     dest="$output_dir/${ok_rel%.pyc}.py" ;;
             esac
             cp "$py_out" "$dest"
+            ok=$((ok + 1))
+          else
+            fail=$((fail + 1))
           fi
           ;;
         "FAIL: "*)

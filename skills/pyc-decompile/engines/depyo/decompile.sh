@@ -11,7 +11,15 @@ find "$INPUT_DIR" -type f \( -name "*.pyc" -o -name "*.pyo" \) | while read pyc_
         py_output="$OUTPUT_DIR/${rel_path%.pyc}.py"
     fi
     mkdir -p "$(dirname "$py_output")"
-    if depyo "$pyc_file" --out > "$py_output" 2>/dev/null && [ -s "$py_output" ]; then
+    tmp_output_dir="$(mktemp -d)"
+    if depyo --basedir "$tmp_output_dir" "$pyc_file" >/dev/null 2>/dev/null; then
+        generated="$(find "$tmp_output_dir" -type f -name "*.py" -print -quit)"
+        if [ -n "$generated" ] && [ -s "$generated" ]; then
+            cp "$generated" "$py_output"
+        fi
+    fi
+    rm -rf "$tmp_output_dir"
+    if [ -s "$py_output" ]; then
         echo "OK: $rel_path"
     else
         rm -f "$py_output"

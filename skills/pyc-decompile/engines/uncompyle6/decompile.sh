@@ -11,7 +11,7 @@ find "$INPUT_DIR" -type f \( -name "*.pyc" -o -name "*.pyo" \) | while read pyc_
         py_output="$OUTPUT_DIR/${rel_path%.pyc}.py"
     fi
     mkdir -p "$(dirname "$py_output")"
-    if uncompyle6 "$pyc_file" > "$py_output" 2>/dev/null && [ -s "$py_output" ]; then
+    if uncompyle6 -o "$(dirname "$py_output")" "$pyc_file" >/dev/null 2>/dev/null && [ -s "$py_output" ]; then
         echo "OK: $rel_path"
     else
         rm -f "$py_output"
