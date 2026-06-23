@@ -13,6 +13,10 @@ $RECYCLE.BIN/
 *~
 .vim/
 
+# Agent workspace state
+.claude/
+.codex/
+
 # Logs
 *.log
 logs/
