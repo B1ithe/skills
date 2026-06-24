@@ -6,12 +6,13 @@ description: Maintain a local Markdown/Obsidian note vault. Use when Codex shoul
 # Note
 
 Use this skill in a vault root. The current working directory should contain
-topic directories directly, with optional `.obsidian/` and `RAW/` directories.
-Do not assume an outer repository directory containing `Root/`.
+topic directories directly, with optional `.obsidian/`, `RAW/`, and agent/tool
+directories such as `.agents/`, `.claude/`, and `.codex/`. Do not assume an
+outer repository directory containing `Root/`.
 
-Treat `.obsidian/` as editor configuration, not note content. Do not inspect,
-format, health-check, rename, ingest, or otherwise modify files under
-`.obsidian/`.
+Treat `.obsidian/`, `.agents/`, `.claude/`, and `.codex/` as configuration or
+tooling, not note content. Do not inspect, format, health-check, rename, ingest,
+or otherwise modify files under those directories.
 
 Scripts require PyYAML. If `import yaml` fails, install from this skill's
 `requirements.txt`.

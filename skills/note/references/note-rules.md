@@ -5,10 +5,12 @@ These rules are the source of truth for the `note` skill.
 ## Vault Model
 
 - The working root is the Obsidian vault root. It contains topic directories,
-  optional `.obsidian/`, and optional `RAW/`.
+  optional `.obsidian/`, optional `RAW/`, and optional agent/tool directories
+  such as `.agents/`, `.claude/`, and `.codex/`.
 - There is no required outer directory and no required `Root/` child.
-- `.obsidian/` is editor configuration. The note skill does not read, format,
-  health-check, rename, ingest, or modify files under `.obsidian/`.
+- `.obsidian/`, `.agents/`, `.claude/`, and `.codex/` are configuration or
+  tooling. The note skill does not read, format, health-check, rename, ingest,
+  or modify files under those directories.
 - `RAW/` stores local source material. It may be absent.
 - Existing RAW content is read-only except for confirmed cross-platform
   filename repairs.
@@ -80,7 +82,8 @@ authors, attachment mappings, or original metadata in the note body.
 ## Cross-Platform Filenames
 
 All note-managed vault paths, including `RAW/`, should be legal on Linux and
-Windows. `.obsidian/` is excluded from filename checks and repairs.
+Windows. `.obsidian/`, `.agents/`, `.claude/`, and `.codex/` are excluded from
+filename checks and repairs.
 
 - Forbidden characters: `< > : " / \ | ? *`.
 - Control characters are forbidden.
@@ -139,7 +142,8 @@ Health checks machine-verifiable note structure only:
 - broken internal links.
 - duplicate Markdown filename stems.
 - local attachment location and existence.
-- cross-platform filename safety, including `RAW/`, excluding `.obsidian/`.
+- cross-platform filename safety, including `RAW/`, excluding configured
+  editor and agent/tool directories.
 
 Missing frontmatter and missing required frontmatter fields are reported as
 update/format candidates. They are not fix blockers by themselves:
@@ -168,7 +172,8 @@ Health does not judge prose quality, topic fit, or knowledge organization.
   conversion, and existing frontmatter field repair.
 - Use single confirmation for RAW moves, content deletion, topic changes,
   duplicate source ownership, and broken wikilinks without an obvious target.
-- Do not modify `.obsidian/` as part of fix planning or repair.
+- Do not modify `.obsidian/`, `.agents/`, `.claude/`, or `.codex/` as part of
+  fix planning or repair.
 
 ## Commits
 

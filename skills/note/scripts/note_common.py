@@ -47,7 +47,7 @@ IGNORED_LOCAL_SCHEMES = (
     "#",
     "$",
 )
-IGNORED_VAULT_DIRS = {".git", ".obsidian"}
+IGNORED_VAULT_DIRS = {".agents", ".claude", ".codex", ".git", ".obsidian"}
 
 
 def vault_root(root: Path) -> Path:
@@ -64,9 +64,11 @@ def is_maintained_note(path: Path, vault: Path) -> bool:
     except ValueError:
         return False
 
+    if any(part in IGNORED_VAULT_DIRS for part in relative.parts):
+        return False
     if relative.parts and relative.parts[0] == "RAW":
         return False
-    return ".obsidian" not in relative.parts and "assets" not in relative.parts
+    return "assets" not in relative.parts
 
 
 def is_ignored_vault_path(path: Path, vault: Path) -> bool:
