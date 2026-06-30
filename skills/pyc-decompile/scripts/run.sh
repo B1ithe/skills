@@ -4,7 +4,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL_DIR="$(dirname "$SCRIPT_DIR")"
 ENGINES_DIR="$SKILL_DIR/engines"
+VALIDATORS_DIR="$SKILL_DIR/validators"
 IMAGE_PREFIX="pyc-decompile"
+ALL_ENGINES="uncompyle2 uncompyle6 decompyle3 pycdc depyo"
 
 # ── Magic number → version lookup ──────────────────────────────────
 
@@ -68,6 +70,7 @@ version_chain() {
 # ── Helpers ───────────────────────────────────────────────────────
 
 image_name() { echo "${IMAGE_PREFIX}:$1"; }
+validator_image_name() { echo "${IMAGE_PREFIX}:validator"; }
 
 engine_covers_version() {
   local wanted_ver="$2"
@@ -91,17 +94,135 @@ detect_version() {
   magic_to_version "$magic"
 }
 
+py_rel_for_source() {
+  local rel="$1"
+  case "$rel" in
+    *.pyo) echo "${rel%.pyo}.py" ;;
+    *)     echo "${rel%.pyc}.py" ;;
+  esac
+}
+
+candidate_rel_for_engine() {
+  local rel="$1"
+  local engine="$2"
+  local py_rel dir base
+  py_rel=$(py_rel_for_source "$rel")
+  dir=$(dirname "$py_rel")
+  base=$(basename "$py_rel" .py)
+  if [ "$dir" = "." ]; then
+    echo "${base}-${engine}.py"
+  else
+    echo "$dir/${base}-${engine}.py"
+  fi
+}
+
+list_contains_exact() {
+  local needle="$1"
+  local haystack="$2"
+  [ -f "$haystack" ] && grep -Fxq -- "$needle" "$haystack"
+}
+
+version_for_rel() {
+  local rel="$1"
+  local version_file="$2"
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    local ver="${line%% *}"
+    local item="${line#* }"
+    if [ "$item" = "$rel" ]; then
+      echo "$ver"
+      return 0
+    fi
+  done < "$version_file"
+  echo "unknown"
+}
+
+has_decompiler_error_markers() {
+  local py_file="$1"
+  grep -Eq "Parse error at or near|Syntax error at or near|Unsupported Python version|Unsupported opcode|Unsupported bytecode|Unknown opcode|Decompiler error|decompilation failed|failed to decompile" "$py_file"
+}
+
+ensure_image() {
+  local label="$1"
+  local img="$2"
+  local context="$3"
+  if docker image inspect "$img" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  echo "[$label] image not found: $img"
+  echo -n "Build it now? [y/N/skip]: "
+  read -r answer
+  case "$answer" in
+    y|Y|yes) docker build -t "$img" "$context" >&2 ;;
+    skip|s) echo "[$label] skipped by user"; return 1 ;;
+    *) echo "[$label] aborting batch"; exit 1 ;;
+  esac
+}
+
+ensure_validator_image() {
+  local img
+  img=$(validator_image_name)
+  if [ -n "${VALIDATOR_SKIP_FILE:-}" ] && [ -f "$VALIDATOR_SKIP_FILE" ]; then
+    return 1
+  fi
+  if ensure_image "validator" "$img" "$VALIDATORS_DIR/python"; then
+    return 0
+  fi
+  [ -n "${VALIDATOR_SKIP_FILE:-}" ] && : > "$VALIDATOR_SKIP_FILE"
+  return 1
+}
+
+syntax_partial_results() {
+  local requests="$1"
+  local result="$2"
+  local reason="$3"
+  while IFS=$'\t' read -r _ver rel _py_rel; do
+    [ -z "$rel" ] && continue
+    printf 'PARTIAL\t%s\tsyntax=%s\n' "$rel" "$reason" >> "$result"
+  done < "$requests"
+}
+
+run_syntax_validation() {
+  local requests="$1"
+  local root="$2"
+  local result="$3"
+  : > "$result"
+  [ -s "$requests" ] || return 0
+
+  local img
+  img=$(validator_image_name)
+  if ensure_validator_image; then
+    if ! docker run --rm \
+      -v "$requests:/requests.tsv:ro" \
+      -v "$root:/candidate:ro" \
+      "$img" /requests.tsv /candidate \
+      > "$result" 2>&1; then
+      : > "$result"
+      syntax_partial_results "$requests" "$result" "validator-error"
+    fi
+  else
+    syntax_partial_results "$requests" "$result" "validator-skipped"
+  fi
+}
+
 # ── Subcommand: build ─────────────────────────────────────────────
 
 cmd_build() {
   echo "Building engine Docker images..."
-  for engine in uncompyle2 uncompyle6 decompyle3 pycdc depyo; do
+  for engine in $ALL_ENGINES; do
     local img
     img=$(image_name "$engine")
     echo "  [$engine] building $img ..."
     docker build -t "$img" "$ENGINES_DIR/$engine" >&2
     echo "  [$engine] done"
   done
+
+  local validator_img
+  validator_img=$(validator_image_name)
+  echo "  [validator] building $validator_img ..."
+  docker build -t "$validator_img" "$VALIDATORS_DIR/python" >&2
+  echo "  [validator] done"
   echo "All images built."
 }
 
@@ -110,7 +231,7 @@ cmd_build() {
 cmd_engines() {
   printf "%-14s %-10s %s\n" "ENGINE" "STATUS" "COVERS"
   printf "%-14s %-10s %s\n" "------" "------" "------"
-  for engine in uncompyle2 uncompyle6 decompyle3 pycdc depyo; do
+  for engine in $ALL_ENGINES; do
     local img status
     img=$(image_name "$engine")
     if docker image inspect "$img" >/dev/null 2>&1; then
@@ -120,6 +241,18 @@ cmd_engines() {
     fi
     printf "%-14s %-10s %s\n" "$engine" "$status" "$(engine_versions "$engine")"
   done
+
+  echo ""
+  printf "%-14s %-10s %s\n" "VALIDATOR" "STATUS" "PYTHON"
+  printf "%-14s %-10s %s\n" "---------" "------" "------"
+  local validator_img validator_status
+  validator_img=$(validator_image_name)
+  if docker image inspect "$validator_img" >/dev/null 2>&1; then
+    validator_status="ready"
+  else
+    validator_status="missing"
+  fi
+  printf "%-14s %-10s %s\n" "validator" "$validator_status" "2.7, 3.8, 3.11, 3.12, 3.14 when available"
 }
 
 # ── Subcommand: decompile ─────────────────────────────────────────
@@ -138,6 +271,8 @@ cmd_decompile() {
   local work_dir
   work_dir="$(mktemp -d)"
   trap "rm -rf $work_dir" EXIT
+  local copied_non_pyc="$work_dir/copied_non_pyc.txt"
+  : > "$copied_non_pyc"
 
   # ── Phase 1: Copy non-pyc/pyo files as-is ───────────────────────
   echo "=== Phase 1: Copying non-pyc files ==="
@@ -145,6 +280,7 @@ cmd_decompile() {
     local rel="${f#$input_dir/}"
     mkdir -p "$output_dir/$(dirname "$rel")"
     cp "$f" "$output_dir/$rel"
+    echo "$rel" >> "$copied_non_pyc"
   done < <(find "$input_dir" -type f ! -name "*.pyc" ! -name "*.pyo" -print0)
 
   # ── Phase 2: Scan magic numbers ─────────────────────────────────
@@ -174,6 +310,19 @@ cmd_decompile() {
   # ── Phase 3: Engine chain execution ─────────────────────────────
   echo "=== Phase 3: Decompilation ==="
 
+  local selected_dir="$work_dir/selected"
+  local partial_dir="$work_dir/partials"
+  local perfect_rels="$work_dir/perfect_rels.txt"
+  local perfect_details="$work_dir/perfect_details.tsv"
+  local partial_details="$work_dir/partial_details.tsv"
+  local fail_details="$work_dir/fail_details.tsv"
+  local VALIDATOR_SKIP_FILE="$work_dir/validator_skipped"
+  mkdir -p "$selected_dir" "$partial_dir"
+  : > "$perfect_rels"
+  : > "$perfect_details"
+  : > "$partial_details"
+  : > "$fail_details"
+
   # Unique versions present
   local versions_present=""
   if [ -s "$version_files" ]; then
@@ -199,6 +348,54 @@ cmd_decompile() {
     all_engines="${all_engines% }"
   fi
 
+  record_perfect() {
+    local rel="$1"
+    local engine="$2"
+    local py_out="$3"
+    local detail="$4"
+    local py_rel
+    py_rel=$(py_rel_for_source "$rel")
+    if list_contains_exact "$rel" "$perfect_rels"; then
+      return 0
+    fi
+    mkdir -p "$selected_dir/$(dirname "$py_rel")"
+    cp "$py_out" "$selected_dir/$py_rel"
+    echo "$rel" >> "$perfect_rels"
+    printf '%s\t%s\t%s\n' "$rel" "$engine" "$detail" >> "$perfect_details"
+  }
+
+  record_partial() {
+    local rel="$1"
+    local engine="$2"
+    local py_out="$3"
+    local reason="$4"
+    local candidate
+    candidate=$(candidate_rel_for_engine "$rel" "$engine")
+    mkdir -p "$partial_dir/$(dirname "$candidate")"
+    cp "$py_out" "$partial_dir/$candidate"
+    printf '%s\t%s\t%s\t%s\n' "$rel" "$engine" "$candidate" "$reason" >> "$partial_details"
+  }
+
+  record_fail() {
+    local rel="$1"
+    local engine="$2"
+    local reason="$3"
+    printf '%s\t%s\t%s\n' "$rel" "$engine" "$reason" >> "$fail_details"
+  }
+
+  clear_generated_outputs() {
+    local rel="$1"
+    local py_rel candidate engine
+    py_rel=$(py_rel_for_source "$rel")
+    if ! list_contains_exact "$py_rel" "$copied_non_pyc"; then
+      rm -f "$output_dir/$py_rel"
+    fi
+    for engine in $ALL_ENGINES; do
+      candidate=$(candidate_rel_for_engine "$rel" "$engine")
+      rm -f "$output_dir/$candidate"
+    done
+  }
+
   # For each engine in order:
   for engine in $all_engines; do
     # Build list of files this engine should process
@@ -211,12 +408,7 @@ cmd_decompile() {
       local ver="${line%% *}"
       local rel="${line#* }"
       if [ -n "$engine_override" ] || engine_covers_version "$engine" "$ver"; then
-        local expected
-        case "$rel" in
-          *.pyo) expected="${rel%.pyo}.py" ;;
-          *)     expected="${rel%.pyc}.py" ;;
-        esac
-        if [ ! -f "$output_dir/$expected" ] || [ ! -s "$output_dir/$expected" ]; then
+        if ! list_contains_exact "$rel" "$perfect_rels"; then
           echo "$rel" >> "$pending"
           needs_image_check=1
         fi
@@ -235,16 +427,7 @@ cmd_decompile() {
     # Check / build image
     local img
     img=$(image_name "$engine")
-    if ! docker image inspect "$img" >/dev/null 2>&1; then
-      echo "[$engine] image not found: $img"
-      echo -n "Build it now? [y/N/skip]: "
-      read -r answer
-      case "$answer" in
-        y|Y|yes) docker build -t "$img" "$ENGINES_DIR/$engine" >&2 ;;
-        skip|s) echo "[$engine] skipped by user"; continue ;;
-        *) echo "[$engine] aborting batch"; exit 1 ;;
-      esac
-    fi
+    ensure_image "$engine" "$img" "$ENGINES_DIR/$engine" || continue
 
     # Stage only the files we need
     local staging="$work_dir/staging_${engine}"
@@ -267,41 +450,85 @@ cmd_decompile() {
       "$img" /input /output \
       > "$result" 2>&1 || true
 
-    # Parse and copy successful outputs
-    local ok=0
+    # Parse outputs, mark partials immediately, and batch syntax-check clean files.
+    local perfect=0
+    local partial=0
     local fail=0
+    local validation_requests="$work_dir/validate_${engine}.tsv"
+    local validation_result="$work_dir/validate_${engine}_result.tsv"
+    : > "$validation_requests"
+    : > "$validation_result"
+
     while IFS= read -r line; do
       case "$line" in
         "OK: "*)
           local ok_rel="${line#OK: }"
-          local py_out
-          case "$ok_rel" in
-            *.pyo) py_out="$eng_output/${ok_rel%.pyo}.py" ;;
-            *)     py_out="$eng_output/${ok_rel%.pyc}.py" ;;
-          esac
+          local py_rel py_out ver
+          py_rel=$(py_rel_for_source "$ok_rel")
+          py_out="$eng_output/$py_rel"
           if [ -f "$py_out" ] && [ -s "$py_out" ]; then
-            mkdir -p "$output_dir/$(dirname "$ok_rel")"
-            local dest
-            case "$ok_rel" in
-              *.pyo) dest="$output_dir/${ok_rel%.pyo}.py" ;;
-              *)     dest="$output_dir/${ok_rel%.pyc}.py" ;;
-            esac
-            cp "$py_out" "$dest"
-            ok=$((ok + 1))
+            if has_decompiler_error_markers "$py_out"; then
+              record_partial "$ok_rel" "$engine" "$py_out" "marker=decompiler-error"
+              partial=$((partial + 1))
+            else
+              ver=$(version_for_rel "$ok_rel" "$version_files")
+              printf '%s\t%s\t%s\n' "$ver" "$ok_rel" "$py_rel" >> "$validation_requests"
+            fi
           else
+            record_fail "$ok_rel" "$engine" "missing-output"
             fail=$((fail + 1))
           fi
           ;;
         "FAIL: "*)
+          local fail_rel="${line#FAIL: }"
+          record_fail "$fail_rel" "$engine" "engine-failed"
           fail=$((fail + 1))
           ;;
       esac
     done < "$result"
-    echo "[$engine] $ok OK, $fail FAIL"
+
+    run_syntax_validation "$validation_requests" "$eng_output" "$validation_result"
+    while IFS=$'\t' read -r status rel detail; do
+      [ -z "$status" ] && continue
+      local py_rel py_out
+      py_rel=$(py_rel_for_source "$rel")
+      py_out="$eng_output/$py_rel"
+      case "$status" in
+        PERFECT)
+          if [ -f "$py_out" ] && [ -s "$py_out" ]; then
+            record_perfect "$rel" "$engine" "$py_out" "$detail"
+            perfect=$((perfect + 1))
+          else
+            record_fail "$rel" "$engine" "missing-output"
+            fail=$((fail + 1))
+          fi
+          ;;
+        PARTIAL)
+          if [ -f "$py_out" ] && [ -s "$py_out" ]; then
+            record_partial "$rel" "$engine" "$py_out" "$detail"
+            partial=$((partial + 1))
+          else
+            record_fail "$rel" "$engine" "missing-output"
+            fail=$((fail + 1))
+          fi
+          ;;
+        *)
+          if [ -f "$py_out" ] && [ -s "$py_out" ]; then
+            record_partial "$rel" "$engine" "$py_out" "syntax=unavailable:validator-output"
+            partial=$((partial + 1))
+          else
+            record_fail "$rel" "$engine" "missing-output"
+            fail=$((fail + 1))
+          fi
+          ;;
+      esac
+    done < "$validation_result"
+
+    echo "[$engine] $perfect PERFECT, $partial PARTIAL, $fail FAIL"
   done
 
-  # ── Phase 4: Batch report ───────────────────────────────────────
-  echo "=== Phase 4: Report ==="
+  # ── Phase 4: Select outputs and report ──────────────────────────
+  echo "=== Phase 4: Selecting outputs and reporting ==="
 
   local report="$output_dir/.batch-report.txt"
   {
@@ -313,46 +540,71 @@ cmd_decompile() {
     echo ""
 
     local ok_total=0
+    local partial_total=0
+    local partial_candidate_total=0
     local fail_total=0
+    local skip_total=0
 
-    # OK: .py files in output
-    while IFS= read -r -d '' py; do
-      local rel="${py#$output_dir/}"
-      echo "OK: $rel"
-      ok_total=$((ok_total + 1))
-    done < <(find "$output_dir" -name "*.py" ! -name ".*" -print0)
-
-    echo ""
-    echo "---"
-    echo ""
-
-    # Failed: .pyc files without corresponding .py
     while IFS= read -r line; do
       [ -z "$line" ] && continue
       local ver="${line%% *}"
       local rel="${line#* }"
-      local expected
-      case "$rel" in
-        *.pyo) expected="${rel%.pyo}.py" ;;
-        *)     expected="${rel%.pyc}.py" ;;
-      esac
-      if [ ! -f "$output_dir/$expected" ] || [ ! -s "$output_dir/$expected" ]; then
+      local py_rel
+      py_rel=$(py_rel_for_source "$rel")
+      clear_generated_outputs "$rel"
+
+      if list_contains_exact "$rel" "$perfect_rels"; then
+        local ok_engine=""
+        local ok_detail=""
+        while IFS=$'\t' read -r p_rel p_engine p_detail; do
+          if [ "$p_rel" = "$rel" ]; then
+            ok_engine="$p_engine"
+            ok_detail="$p_detail"
+            break
+          fi
+        done < "$perfect_details"
+
+        mkdir -p "$output_dir/$(dirname "$py_rel")"
+        cp "$selected_dir/$py_rel" "$output_dir/$py_rel"
+        echo "OK: $py_rel (source: $rel, version: $ver, engine: $ok_engine, $ok_detail)"
+        ok_total=$((ok_total + 1))
+        continue
+      fi
+
+      local found_partial=0
+      while IFS=$'\t' read -r p_rel p_engine p_candidate p_reason; do
+        if [ "$p_rel" = "$rel" ]; then
+          mkdir -p "$output_dir/$(dirname "$p_candidate")"
+          cp "$partial_dir/$p_candidate" "$output_dir/$p_candidate"
+          echo "PARTIAL: $p_candidate (source: $rel, version: $ver, engine: $p_engine, $p_reason)"
+          found_partial=1
+          partial_candidate_total=$((partial_candidate_total + 1))
+        fi
+      done < "$partial_details"
+
+      if [ "$found_partial" -eq 1 ]; then
+        partial_total=$((partial_total + 1))
+      else
         echo "FAIL: $rel (version: $ver)"
         fail_total=$((fail_total + 1))
       fi
     done < "$version_files"
+
+    echo ""
+    echo "---"
+    echo ""
 
     # Unknown files
     if [ -f "$unknown_list" ]; then
       while IFS= read -r rel; do
         [ -z "$rel" ] && continue
         echo "SKIP: $rel (unknown magic number)"
-        fail_total=$((fail_total + 1))
+        skip_total=$((skip_total + 1))
       done < "$unknown_list"
     fi
 
     echo ""
-    echo "Summary: $ok_total OK, $fail_total FAIL/SKIP"
+    echo "Summary: $ok_total OK, $partial_total PARTIAL ($partial_candidate_total candidates), $fail_total FAIL, $skip_total SKIP"
   } > "$report"
 
   cat "$report"

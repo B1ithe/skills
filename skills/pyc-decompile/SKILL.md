@@ -5,7 +5,7 @@ description: "Decompile Python .pyc and .pyo files into readable .py source code
 
 # PYC Decompiler Skill
 
-Decompile `.pyc` and `.pyo` files into readable `.py` source using a chain of Docker-isolated decompiler engines. Each engine runs in its own container with exactly the right runtime environment — no host-side Python/Node.js/C++ dependency.
+Decompile `.pyc` and `.pyo` files into readable `.py` source using a chain of Docker-isolated decompiler engines. Each engine runs in its own container with exactly the right runtime environment, and a separate Docker validator image performs Python syntax checks for generated source. No host-side Python/Node.js/C++ dependency is needed.
 
 ## Engines
 
@@ -18,6 +18,18 @@ Decompile `.pyc` and `.pyo` files into readable `.py` source using a chain of Do
 | depyo | 1.0 – 3.14 | Node.js |
 
 Each engine has a known version coverage range. Files are routed to engines based on their Python version (detected from the magic number in the `.pyc` header). When the primary engine fails on a file, the next engine in the chain is tried automatically.
+
+## Output Quality
+
+Each generated `.py` is classified before it is accepted:
+
+| Status | Meaning | Output |
+|---|---|---|
+| `perfect` | Non-empty output, no known decompiler error marker, and Docker syntax validation passes when a matching validator interpreter is available | Normal path, such as `taskwork/taskpass.py` |
+| `partial` | Non-empty output, but it contains a decompiler error marker or fails Docker syntax validation | Engine-suffixed path, such as `taskwork/taskpass-uncompyle6.py` |
+| `fail` | Engine produced no usable `.py` output | No candidate file, report only |
+
+If any later engine produces a `perfect` result, earlier `partial` candidates for that source file are discarded and only the normal `.py` is written. If no engine produces a `perfect` result, every `partial` candidate is written with the engine suffix.
 
 ## Engine Chain (Version Routing)
 
@@ -63,7 +75,7 @@ Before the first decompilation, build all engine images:
 bash {SKILL_DIR}/scripts/run.sh build
 ```
 
-This creates 5 Docker images: `pyc-decompile:uncompyle2`, `pyc-decompile:uncompyle6`, `pyc-decompile:decompyle3`, `pyc-decompile:pycdc`, `pyc-decompile:depyo`.
+This creates 6 Docker images: `pyc-decompile:uncompyle2`, `pyc-decompile:uncompyle6`, `pyc-decompile:decompyle3`, `pyc-decompile:pycdc`, `pyc-decompile:depyo`, and `pyc-decompile:validator`.
 
 ### Checking Engine Status
 
@@ -84,9 +96,10 @@ The command:
 2. Scans magic numbers in `.pyc`/`.pyo` files to detect Python versions
 3. Routes each file through the appropriate engine chain
 4. Engines run one at a time (serial), each processing its pending files
-5. If an engine image is missing, prompts the user to build or skip
-6. Failed files are retried with the next engine in chain
-7. Produces a batch report at `.batch-report.txt` in the output directory
+5. Classifies each engine output as `perfect`, `partial`, or `fail`
+6. Caches `partial` outputs while continuing through later engines
+7. Selects the first `perfect` output when available; otherwise writes all `partial` candidates
+8. Produces a batch report at `.batch-report.txt` in the output directory
 
 ## Workflow
 
@@ -108,6 +121,8 @@ The command:
 ├── utils.pyc          →       ├── utils.py          (反编译成功)
 ├── models.pyc         →       ├── models.py         (反编译成功)
 ├── broken.pyc         →       (失败，不出现在输出中)
+├── partial.pyc        →       ├── partial-uncompyle6.py  (部分失败候选)
+│                                └── partial-depyo.py      (部分失败候选)
 ├── data.json          →       ├── data.json         (原样复制)
 └── lib/                       └── lib/
     └── helpers.pyc    →           └── helpers.py    (反编译成功)
@@ -116,6 +131,8 @@ The command:
 
 - `.pyc`/`.pyo` files: decompiled to `.py`, preserving directory structure
 - All other files: copied as-is
+- Perfect decompilations: written as normal `.py` files, preserving directory structure
+- Partial decompilations: written as `name-engine.py` only when no later engine produces a perfect result
 - Failed decompilations: absent from output, recorded in report
 - Report: `.batch-report.txt` in output root
 
@@ -123,7 +140,8 @@ The command:
 
 - Only Docker is required on the host — no Python, Node.js, or C++ toolchain needed.
 - Engine images are built once and reused; rebuild only when upstream tools update.
-- If an engine image is missing at decompile time, the script prompts interactively (build / skip / abort).
+- The validator image is built once and reused. It attempts to install Python 2.7, 3.8, 3.11, 3.12, and 3.14 interpreters through `pyenv`; unavailable interpreter families are reported as `syntax=unavailable`.
+- If an engine or validator image is missing at decompile time, the script prompts interactively (build / skip / abort).
 - Unknown magic numbers (corrupted or non-standard `.pyc` files) are skipped and reported.
 - Engine execution is serial — one container at a time — for predictable resource use.
 - `.pyo` files are treated identically to `.pyc` files.
