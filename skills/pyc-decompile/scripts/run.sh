@@ -139,7 +139,7 @@ version_for_rel() {
 
 has_decompiler_error_markers() {
   local py_file="$1"
-  grep -Eq "Parse error at or near|Syntax error at or near|Unsupported Python version|Unsupported opcode|Unsupported bytecode|Unknown opcode|Decompiler error|decompilation failed|failed to decompile" "$py_file"
+  grep -Eiq "Parse error at or near|Syntax error at or near|Unsupported Python version|Unsupported opcode|Unsupported bytecode|Unknown opcode|Decompiler error|Decompyle incomplete|decompilation failed|failed to decompile" "$py_file"
 }
 
 ensure_image() {
