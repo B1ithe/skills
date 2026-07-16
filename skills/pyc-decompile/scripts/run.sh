@@ -7,6 +7,7 @@ ENGINES_DIR="$SKILL_DIR/engines"
 VALIDATORS_DIR="$SKILL_DIR/validators"
 IMAGE_PREFIX="pyc-decompile"
 ALL_ENGINES="uncompyle2 uncompyle6 decompyle3 pycdc depyo"
+DEFAULT_JOBS="${PYC_DECOMPILE_JOBS:-4}"
 
 # ── Magic number → version lookup ──────────────────────────────────
 
@@ -142,6 +143,15 @@ has_decompiler_error_markers() {
   grep -Eiq "Parse error at or near|Syntax error at or near|Unsupported Python version|Unsupported opcode|Unsupported bytecode|Unknown opcode|Decompiler error|Decompyle incomplete|decompilation failed|failed to decompile" "$py_file"
 }
 
+validate_jobs() {
+  case "$1" in
+    ''|*[!0-9]*|0)
+      echo "ERROR: jobs must be a positive integer: $1" >&2
+      return 1
+      ;;
+  esac
+}
+
 ensure_image() {
   local label="$1"
   local img="$2"
@@ -187,6 +197,7 @@ run_syntax_validation() {
   local requests="$1"
   local root="$2"
   local result="$3"
+  local jobs="$4"
   : > "$result"
   [ -s "$requests" ] || return 0
 
@@ -196,7 +207,7 @@ run_syntax_validation() {
     if ! docker run --rm \
       -v "$requests:/requests.tsv:ro" \
       -v "$root:/candidate:ro" \
-      "$img" /requests.tsv /candidate \
+      "$img" /requests.tsv /candidate "$jobs" \
       > "$result" 2>&1; then
       : > "$result"
       syntax_partial_results "$requests" "$result" "validator-error"
@@ -261,8 +272,10 @@ cmd_decompile() {
   local input_dir="$1"
   local output_dir="$2"
   local engine_override="$3"  # optional: force a specific engine
+  local jobs="$4"
 
   [ -d "$input_dir" ] || { echo "ERROR: input directory not found: $input_dir" >&2; exit 1; }
+  validate_jobs "$jobs" || exit 1
   mkdir -p "$output_dir"
 
   input_dir="$(cd "$input_dir" && pwd)"
@@ -309,6 +322,7 @@ cmd_decompile() {
 
   # ── Phase 3: Engine chain execution ─────────────────────────────
   echo "=== Phase 3: Decompilation ==="
+  echo "Parallel workers per engine: $jobs"
 
   local selected_dir="$work_dir/selected"
   local partial_dir="$work_dir/partials"
@@ -447,7 +461,7 @@ cmd_decompile() {
       -v "$staging:/input:ro" \
       -v "$eng_output:/output" \
       -v "$ENGINES_DIR/$engine/decompile.sh:/decompile.sh:ro" \
-      "$img" /input /output \
+      "$img" /input /output "$jobs" \
       > "$result" 2>&1 || true
 
     # Parse outputs, mark partials immediately, and batch syntax-check clean files.
@@ -487,7 +501,7 @@ cmd_decompile() {
       esac
     done < "$result"
 
-    run_syntax_validation "$validation_requests" "$eng_output" "$validation_result"
+    run_syntax_validation "$validation_requests" "$eng_output" "$validation_result" "$jobs"
     while IFS=$'\t' read -r status rel detail; do
       [ -z "$status" ] && continue
       local py_rel py_out
@@ -620,9 +634,10 @@ usage() {
   echo "Commands:"
   echo "  build                  Build all engine Docker images"
   echo "  engines                List engine availability status"
-  echo "  decompile [--engine <name>] <in> <out>"
+  echo "  decompile [--engine <name>] [--jobs <count>] <in> <out>"
   echo "                         Decompile .pyc files from input dir to output dir"
   echo "                         --engine: force a specific engine (skip version routing)"
+  echo "                         --jobs: parallel files per engine (default: $DEFAULT_JOBS)"
   exit 1
 }
 
@@ -631,6 +646,7 @@ case "${1:-}" in
   engines)  cmd_engines ;;
   decompile)
     ENGINE_OVERRIDE=""
+    JOBS="$DEFAULT_JOBS"
     INPUT_ARG=""
     OUTPUT_ARG=""
     while [ $# -gt 1 ]; do
@@ -638,6 +654,11 @@ case "${1:-}" in
         --engine)
           [ $# -lt 4 ] && { echo "ERROR: --engine requires a value" >&2; usage; }
           ENGINE_OVERRIDE="$3"
+          shift 2
+          ;;
+        --jobs)
+          [ $# -lt 4 ] && { echo "ERROR: --jobs requires a value" >&2; usage; }
+          JOBS="$3"
           shift 2
           ;;
         *)
@@ -653,7 +674,7 @@ case "${1:-}" in
       esac
     done
     [ -n "$INPUT_ARG" ] && [ -n "$OUTPUT_ARG" ] || { echo "ERROR: decompile requires input and output directories" >&2; usage; }
-    cmd_decompile "$INPUT_ARG" "$OUTPUT_ARG" "$ENGINE_OVERRIDE"
+    cmd_decompile "$INPUT_ARG" "$OUTPUT_ARG" "$ENGINE_OVERRIDE" "$JOBS"
     ;;
   *) usage ;;
 esac

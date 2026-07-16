@@ -65,6 +65,9 @@ bash {SKILL_DIR}/scripts/run.sh engines
 
 # Decompile a directory of .pyc files
 bash {SKILL_DIR}/scripts/run.sh decompile <input_dir> <output_dir>
+
+# Control the number of files processed concurrently by each engine
+bash {SKILL_DIR}/scripts/run.sh decompile --jobs 8 <input_dir> <output_dir>
 ```
 
 ### Building Images
@@ -88,14 +91,14 @@ Shows which images are built (`ready`) and which are missing.
 ### Running a Batch Decompilation
 
 ```bash
-bash {SKILL_DIR}/scripts/run.sh decompile ./input_dir ./output_dir
+bash {SKILL_DIR}/scripts/run.sh decompile --jobs 4 ./input_dir ./output_dir
 ```
 
 The command:
 1. Copies non-`.pyc`/`.pyo` files as-is to output
 2. Scans magic numbers in `.pyc`/`.pyo` files to detect Python versions
 3. Routes each file through the appropriate engine chain
-4. Engines run one at a time (serial), each processing its pending files
+4. Preserves engine-chain priority while each engine processes its pending files concurrently
 5. Classifies each engine output as `perfect`, `partial`, or `fail`
 6. Caches `partial` outputs while continuing through later engines
 7. Selects the first `perfect` output when available; otherwise writes all `partial` candidates
@@ -109,7 +112,7 @@ The command:
 
 3. **Run decompilation**:
    ```bash
-   bash {SKILL_DIR}/scripts/run.sh decompile /path/to/input /path/to/output
+   bash {SKILL_DIR}/scripts/run.sh decompile --jobs 4 /path/to/input /path/to/output
    ```
 
 4. **Report results**: After decompilation completes, the batch report is printed to stdout and saved to `.batch-report.txt` in the output directory. Summarize the results for the user — how many files succeeded, failed, or were skipped.
@@ -143,6 +146,7 @@ The command:
 - The validator image is built once and reused. It attempts to install Python 2.7, 3.8, 3.11, 3.12, and 3.14 interpreters through `pyenv`; unavailable interpreter families are reported as `syntax=unavailable`.
 - If an engine or validator image is missing at decompile time, the script prompts interactively (build / skip / abort).
 - Unknown magic numbers (corrupted or non-standard `.pyc` files) are skipped and reported.
-- Engine execution is serial — one container at a time — for predictable resource use.
+- Engine-chain stages remain ordered so a later fallback only receives unresolved files. Within each stage, files and syntax checks run concurrently.
+- `--jobs <count>` controls concurrent files per engine and validator; it defaults to `4`. Set `PYC_DECOMPILE_JOBS` to change the default, or use `--jobs 1` to restore serial processing.
 - `.pyo` files are treated identically to `.pyc` files.
 - Non-`.pyc`/`.pyo` files are copied as-is, not passed to any engine.
