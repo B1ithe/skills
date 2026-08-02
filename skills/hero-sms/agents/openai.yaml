@@ -1,0 +1,4 @@
+interface:
+  display_name: "Hero SMS"
+  short_description: "Integrate and operate Hero SMS APIs safely"
+  default_prompt: "Use $hero-sms to integrate a compliant Hero SMS activation flow."
