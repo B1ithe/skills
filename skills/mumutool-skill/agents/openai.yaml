@@ -1,0 +1,4 @@
+interface:
+  display_name: "MuMuTool Skill"
+  short_description: "Control MuMuPlayer for Mac with mumutool and ADB"
+  default_prompt: "Use $mumutool-skill to inspect and control my MuMuPlayer for Mac instance safely."
