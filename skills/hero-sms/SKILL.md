@@ -29,6 +29,7 @@ The bundled CLI requires `--yes` for every mutating command. Preserve an equival
 - Prefer `GET /api/v1/activations/offers` for current grouped availability and prices. The legacy top-country methods are deprecated.
 - Use `https://hero-sms.com/api/v1` for email activation and offers. Authenticate these REST calls with `Authorization: ApiKey <key>`.
 - Authenticate compatibility-handler calls with the `api_key` query parameter. Prevent HTTP clients and observability systems from logging complete query strings.
+- Send an explicit non-empty `User-Agent`; Hero SMS can reject Python's default request signature with `403 / 1010`. The bundled CLI sends `HeroSMS-Skill/1.0`.
 
 Do not silently mix response parsers: compatibility actions can return plain text or JSON, while REST endpoints return JSON or an empty `204` response.
 
@@ -47,6 +48,7 @@ The run is complete only when the activation ID, returned result or terminal sta
 
 - Set a finite HTTP timeout. Retry only transient transport errors, `429`, and appropriate `5xx` responses with bounded exponential backoff and jitter.
 - Do not retry purchase or lifecycle mutations blindly. Reconcile with `getActiveActivations`, `getStatus`, or history after an ambiguous timeout before issuing another mutation.
+- On `WRONG_MAX_PRICE`, treat `info.min` as a fresh price signal, not permission to spend more. No activation was created: refresh offers and retry only when the new minimum remains within the user's approved ceiling.
 - Treat `401/403` as configuration or authorization failures, `402` as insufficient funds, `404` according to the operation, `409` as an invalid lifecycle transition, and `422` as invalid input.
 - Preserve the structured error fields `title`, `details`, and `info` when present. Include the activation ID in operational logs, but redact phone numbers, message text, verification codes, and credentials by default.
 - Make webhook consumers idempotent by activation ID and message identity. Return `200` promptly after durable acceptance, then process asynchronously.

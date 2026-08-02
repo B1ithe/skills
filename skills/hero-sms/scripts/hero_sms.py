@@ -15,11 +15,20 @@ from urllib.request import Request, urlopen
 
 DEFAULT_HANDLER_URL = "https://hero-sms.com/stubs/handler_api.php"
 DEFAULT_API_BASE_URL = "https://hero-sms.com/api/v1"
+DEFAULT_HEADERS = {
+    "User-Agent": "HeroSMS-Skill/1.0",
+    "Accept": "application/json, text/plain;q=0.9, */*;q=0.8",
+}
 MUTATING_COMMANDS = {"number", "set-status", "finish", "cancel"}
 
 
 class HeroSmsError(RuntimeError):
     """A sanitized Hero SMS transport or protocol failure."""
+
+    def __init__(self, message: str, *, status: Optional[int] = None, payload: Any = None) -> None:
+        super().__init__(message)
+        self.status = status
+        self.payload = payload
 
 
 def parse_payload(body: bytes, content_type: str = "") -> Any:
@@ -41,14 +50,19 @@ def request(
     headers: Optional[Dict[str, str]] = None,
     timeout: float = 20.0,
 ) -> Any:
-    req = Request(url, method=method, headers=headers or {})
+    request_headers = {**DEFAULT_HEADERS, **(headers or {})}
+    req = Request(url, method=method, headers=request_headers)
     try:
         with urlopen(req, timeout=timeout) as response:
             return parse_payload(response.read(), response.headers.get("Content-Type", ""))
     except HTTPError as exc:
         payload = parse_payload(exc.read(), exc.headers.get("Content-Type", ""))
         detail = json.dumps(payload, ensure_ascii=False) if not isinstance(payload, str) else payload
-        raise HeroSmsError(f"Hero SMS HTTP {exc.code}: {detail or exc.reason}") from None
+        raise HeroSmsError(
+            f"Hero SMS HTTP {exc.code}: {detail or exc.reason}",
+            status=exc.code,
+            payload=payload,
+        ) from None
     except URLError as exc:
         raise HeroSmsError(f"Hero SMS transport error: {exc.reason}") from None
 
@@ -77,6 +91,14 @@ def require_confirmation(args: argparse.Namespace) -> None:
         )
 
 
+def wrong_max_price_minimum(error: HeroSmsError) -> Any:
+    payload = error.payload
+    if error.status != 400 or not isinstance(payload, dict) or payload.get("title") != "WRONG_MAX_PRICE":
+        return None
+    info = payload.get("info")
+    return info.get("min") if isinstance(info, dict) else None
+
+
 def run(args: argparse.Namespace, api_key: str) -> Any:
     require_confirmation(args)
     timeout = args.timeout
@@ -95,18 +117,29 @@ def run(args: argparse.Namespace, api_key: str) -> Any:
         return rest_get("activations/offers", api_key, timeout, services=args.services, countries=args.countries)
     if args.command == "number":
         action = "getNumberV2" if args.v2 else "getNumber"
-        return legacy(
-            action,
-            api_key,
-            timeout,
-            service=args.service,
-            country=args.country,
-            operator=args.operator,
-            maxPrice=args.max_price,
-            fixedPrice="true" if args.fixed_price else None,
-            ref=args.ref,
-            phoneException=args.phone_exception,
-        )
+        try:
+            return legacy(
+                action,
+                api_key,
+                timeout,
+                service=args.service,
+                country=args.country,
+                operator=args.operator,
+                maxPrice=args.max_price,
+                fixedPrice="true" if args.fixed_price else None,
+                ref=args.ref,
+                phoneException=args.phone_exception,
+            )
+        except HeroSmsError as exc:
+            minimum = wrong_max_price_minimum(exc)
+            if minimum is None:
+                raise
+            raise HeroSmsError(
+                f"Hero SMS rejected --max-price; current minimum is {minimum}. "
+                "No activation was created. Refresh offers and retry only within the user's approved ceiling.",
+                status=exc.status,
+                payload=exc.payload,
+            ) from None
     if args.command == "status":
         return legacy("getStatusV2" if args.v2 else "getStatus", api_key, timeout, id=args.id)
     if args.command == "all-sms":

@@ -13,6 +13,8 @@ The project rules currently state a default account limit of 40 requests per sec
 
 Set `HERO_SMS_API_KEY` in the process environment. With curl, use `--data-urlencode` rather than constructing query strings manually so commas and other values are encoded safely.
 
+Send an explicit `User-Agent` from non-browser HTTP clients. Live verification showed that Python's default `urllib` request signature can receive Cloudflare `403` with error code `1010`; `User-Agent: HeroSMS-Skill/1.0` was accepted. The bundled CLI sets this header and an `Accept` header automatically.
+
 ## Core activation actions
 
 All actions below use the compatibility handler unless stated otherwise.
@@ -58,21 +60,21 @@ Use the dedicated `finishActivation` and `cancelActivation` endpoints when a JSO
 
 | Action/endpoint | Parameters | Notes |
 | --- | --- | --- |
-| `getCountries` | none | Returns objects containing numeric `id` and localized names. |
+| `getCountries` | none | Live compatibility responses are objects keyed by numeric country ID; each value contains localized country metadata. |
 | `getServicesList` | optional `country`, `lang` | `lang` includes `cn`, `de`, `en`, `es`, `fr`; default is `en`. |
 | `getOperators` | optional `country` | Returns operators grouped by country. |
-| `getPrices` | optional `service`, `country` | Returns cost and available count; examples also include `physicalCount`. |
+| `getPrices` | optional `service`, `country` | Unfiltered live responses are objects keyed by country ID, with service prices and counts nested below. Filtered shapes can be narrower. |
 | `GET /api/v1/activations/offers` | optional comma-separated `services`, `countries` | Preferred grouped offer endpoint. Uses the REST base and header authentication. |
 | `getTopCountriesByService` | `service`, optional `freePrice` | Deprecated; use activation offers. |
 | `getTopCountriesByServiceRank` | `service`, optional `freePrice` | Deprecated; use activation offers. |
 
-The offers response groups `data` by service code and country ID. Each offer includes `prices` (`default`, `retail`, `min`), `counts` (`total`, `physical`, `defaultPrice`), and a price-to-availability `map`. Preserve `meta` because it contains ordering and filter information.
+The offers response groups `data` by service code and country ID. Each offer includes `prices` (`default`, `retail`, `min`), `counts` (`total`, `physical`, `defaultPrice`), and a price-to-availability `map`. Preserve `meta` because it contains ordering and filter information. Treat offers as snapshots: live verification observed a quoted minimum of `0.015` followed by `WRONG_MAX_PRICE` with a current minimum of `0.0165` during acquisition.
 
 ## Rental, prolongation, and reactivation
 
 | Action | Method | Required parameters | Purpose |
 | --- | --- | --- | --- |
-| `serviceCountRent` | GET | `service` | Current rental price/count; optional `country`, `operator`, `currency`. |
+| `serviceCountRent` | GET | `service` | Current rental price/count; optional `country`, `operator`, `currency`. An empty object is a successful response meaning no matching rental inventory. |
 | `getRentServicesAndCountries` | GET | `country`, `duration` | Rental services, quantities, prices, and operators. |
 | `getRentNumber` | GET | `service`, `country`, `duration` | Acquire a rental; optional `operator`, `currency`, `ref`. |
 | `getAllSms` | GET | `id` | Read all messages for an activation or rental. |
@@ -95,6 +97,16 @@ Inspect both the HTTP status and body.
 - HTTP `400/422` indicate invalid input, `401` invalid API key, `402` insufficient funds, `403` denied/banned, `404` missing action/activation or no sellable number depending on the operation, `409` invalid lifecycle transition, `429` throttling, and `500` a server error.
 
 Compatibility handlers may return a business token in an HTTP-success response. Accept only a documented success prefix/status for the current action; treat any other token as a typed failure rather than a successful opaque string.
+
+### Price drift
+
+When acquisition returns `WRONG_MAX_PRICE`:
+
+1. Treat the failed request as not having created an activation.
+2. Read the current minimum from `info.min` and refresh `activations/offers` or `getPrices`.
+3. Compare the refreshed price with the user's original maximum-price ceiling.
+4. Retry only when it remains within that ceiling. Never increase the ceiling automatically.
+5. After an ambiguous transport timeout instead of a definite HTTP error, reconcile active activations before any retry.
 
 ## Safe polling loop
 

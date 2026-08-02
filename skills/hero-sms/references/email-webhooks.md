@@ -22,7 +22,7 @@ Send JSON request bodies with `Content-Type: application/json`. Successful JSON 
 | `GET /emails/{emailId}` | Email activation ID | Current activation in `data` |
 | `DELETE /emails/{emailId}` | Email activation ID | HTTP `204`, no body |
 | `POST /emails/{emailId}/reorder` | Email activation ID | Replacement/reordered activation in `data` |
-| `GET /emails/domains` | Optional `site` | Available domains with `name`, `cost`, `count` |
+| `GET /emails/domains` | Required `site` | Available domains with `name`, `cost`, `count`; omitting `site` returns `422`. |
 
 Batch `count` must be from 1 through 10. The optional batch `service` code is 2–4 characters.
 
