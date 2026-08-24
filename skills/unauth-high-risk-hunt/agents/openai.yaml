@@ -1,0 +1,4 @@
+interface:
+  display_name: "Unauth High-Risk Hunt"
+  short_description: "Hunt remote unauth RCE without lowering the bar; includes SQLi and file I/O"
+  default_prompt: "Use $unauth-high-risk-hunt to hunt remote unauthenticated RCE or chains to a command sink. Freeze the acceptance bar first. SQLi and file read/write are mandatory primitives, but version()/SPA HTML is not RCE — they must reach disk-exec or token mint."
