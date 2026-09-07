@@ -35,10 +35,12 @@ Tests: <command run, or "not run">
 ## Example Body Lines
 
 - `- summarize staged and unstaged changes before drafting the message`
-- `- flag .env and credential files for manual review before staging`
+- `- distinguish path-based sensitivity hints from confirmed credentials before staging`
 - `Tests: python3 /Users/blithe/.codex/skills/.system/skill-creator/scripts/quick_validate.py skills/git-auto-commit`
 
-## Split Instead Of Forcing One Commit
+## Signals for Reviewing Commit Cohesion
+
+These combinations warrant checking whether the changes belong together, not an automatic pause or split. Apply the requested scope and clarification boundaries in [SKILL.md](../SKILL.md#clarification-and-approval-boundaries):
 
 - unrelated refactor plus feature work
 - version bumps mixed with behavior changes

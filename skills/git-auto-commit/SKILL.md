@@ -7,13 +7,19 @@ description: Analyze staged and unstaged Git changes, infer the repository's com
 
 Create high-quality Git commits by combining local diff analysis, repository-specific message style, and cautious staging.
 
+## Choose the Requested Outcome
+
+- Message or summary only: inspect the relevant changes and return a draft. Do not stage or commit, and do not ask whether to commit merely because this skill supports it.
+- Commit requested: inspect, stage the authorized change set, commit, and verify the result. Reuse an explicit request or prior approval for the same scope; apply the boundaries below if new ambiguity or sensitive content appears.
+- No changes in the requested scope: report that fact and any unrelated changes. Do not ask for confirmation or create an empty commit.
+
 ## Quick Start
 
-1. Confirm the repository state with `git rev-parse --show-toplevel` and `git status --short`.
+1. Inspect the repository state with `git rev-parse --show-toplevel` and `git status --short`.
 2. Run `{SKILL_DIR}/scripts/collect-git-context.py` from the target repository.
 3. Review `git diff --cached` and `git diff` when the summary is not enough.
-4. Stage only the cohesive working set, then write a detailed multi-line commit message.
-5. Commit non-interactively and show the resulting summary with `git show --stat --summary -1`.
+4. Write the message; stage the cohesive working set only in the commit branch.
+5. In the commit branch, commit non-interactively and show the resulting summary with `git show --stat --summary -1`. In the draft branch, return the message.
 
 ## Workflow
 
@@ -49,14 +55,15 @@ Mirror the recent commit history instead of forcing a universal format.
 
 Load [references/commit-message-guidelines.md](references/commit-message-guidelines.md) only when you need extra examples or formatting heuristics.
 
-### 3. Stage deliberately
+### 3. Select the change set and stage only for a commit
 
 Prefer explicit staging over `git add -A` when the user mentioned only part of the work.
 
-- Stage only the files that match the requested change.
-- Pause if the working tree mixes unrelated work that should become separate commits.
-- Do not auto-stage clearly sensitive files such as `.env`, private keys, or credential exports unless the user explicitly wants them committed.
-- Treat generated directories such as `dist/`, `build/`, `coverage/`, or minified bundles as review-required rather than automatic.
+- Select only the files or hunks that match the requested change. If unrelated work is clearly separable, leave it untouched and proceed with the authorized set. Ask only when ownership or safe separation remains unclear, or when the proposed split changes the user's requested scope or commit count.
+- Preserve unrelated staged and unstaged work. Inspect the actual commit contents before committing; do not include unrelated staged changes or reset the user's index to simplify selection. If the authorized set cannot be isolated safely, prepare the message and explain the specific conflict before asking.
+- Collector flags are path-based review hints, not proof of sensitive content. Inspect the relevant diff without exposing secrets. A verified placeholder-only `.env.example` or ordinary source file whose name contains `token` may be included in the authorized set.
+- Actual credentials, private keys, credential exports, or content whose sensitivity remains unresolved require explicit user approval covering those files before inclusion. Do not treat a generic request to commit as that approval.
+- Review generated directories such as `dist/`, `build/`, `coverage/`, and minified bundles yourself. Include them only when they belong to the requested change and repository conventions require them to be tracked; ask if that cannot be established. A generated-file flag alone does not require user review.
 
 ### 4. Write the commit message
 
@@ -83,21 +90,23 @@ Use `git commit --file <tmpfile>` for multi-line messages instead of stacking ma
 
 ### 5. Finish and report
 
-After committing:
+For a draft, return the proposed message and any material uncertainty about its scope. For a commit, verify it was created and inspect the result:
 
 - Show `git status --short`
 - Show `git log -1 --stat --decorate`
-- Tell the user the commit hash, subject, and any remaining unstaged changes
+- Tell the user the commit hash, subject, and any remaining staged, unstaged, or untracked work
 
-## Ask Before Proceeding
+If committing fails, inspect the error and continue with authorized, scoped recovery. Report an unresolved blocker and the prepared message rather than claiming the commit succeeded.
 
-Stop and confirm with the user when:
+## Clarification and Approval Boundaries
 
-- the diff contains unrelated changes that should likely be split
-- merge conflicts, rebases, or cherry-picks are in progress
-- there are no changes to commit
-- flagged sensitive files appear in the intended commit
-- the user asked for one commit but the repo state suggests a narrower staging set
+Prepare the relevant diff review and message before asking. Pause only the affected staging or commit operation when:
+
+- Change ownership, safe separation, or the requested commit scope/count remains unresolved after inspection.
+- A merge, rebase, or cherry-pick is in progress and the user has not authorized the specific resolution or continuation. Read-only inspection and message drafting may continue; do not abort or continue the operation just to make a commit possible.
+- Actual or unresolved sensitive content would enter the commit without the specific approval described above.
+
+An existing approval remains valid for the same files, operation, and effects. New sensitive content or a material scope change requires a new decision; separable unrelated changes and an empty change set do not.
 
 ## Resources
 
