@@ -183,6 +183,11 @@ Treat password profiles as local plaintext secrets. Do not print, commit, publis
 
 - Use this CLI instead of raw `ssh`, `scp`, or `sftp` when the skill is available.
 - Use `interactive` for commands that require PTY, shell prompts, menus, or interactive sudo.
-- Before destructive remote changes, privilege changes, service restarts, data deletion, or broad writes, explain the exact command and expected impact, then get user confirmation.
+- Before destructive remote changes, privilege changes, service restarts, data deletion, or broad writes, prepare the exact command, target, and expected impact and obtain explicit user approval covering them. Reuse approval already given for that same command, target, and impact; ask again only when they materially change. A general request to diagnose or fix a service does not by itself authorize a restart.
+- Complete bounded read-only diagnosis and command/impact preparation before asking for missing approval. Pause only the dependent operation and continue independent work within the request; connection access is not authorization for unrelated remote changes.
 - Do not create, edit, delete, parse, or manage SSH config entries from this skill.
 - Do not use this skill for SSH tunnels, key management, `rsync`, server-to-server copy, or batch host fan-out.
+
+## Completion
+
+Verify the requested remote result using the command's exit status and an appropriate read-only state check; a successful connection test alone does not complete a command, transfer, or repair request. After a disconnect or timeout during a mutation, inspect the remote state before retrying so an uncertain result does not cause duplicate effects. Report what completed, what was verified, and any specific operation still blocked by access or approval.
