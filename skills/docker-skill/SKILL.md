@@ -28,7 +28,17 @@ Apply these rules before loading deeper references:
 - Prefer read-only diagnostics and bounded output before state-changing commands.
 - Keep secrets, `.env` contents, private keys, credentials, and tokens out of Dockerfiles, image layers, Compose files, logs, and final replies.
 - Do not add or preserve high-risk container privileges by default: `privileged: true`, `network_mode: host`, broad host mounts, `/var/run/docker.sock` mounts, broad `cap_add`, or long-running root processes.
-- Ask for explicit confirmation before destructive, broad, publishing, or production-like operations such as `docker push`, registry login, `docker system prune`, deleting volumes, `compose down -v`, restarting production services, or operating against a remote/production Docker context.
+
+## Authorization and Completion
+
+This section is the approval source of truth for both references. Host execution permissions still apply.
+
+- Resolve targets from the request, project files, and container labels before asking. Ask if the required target is still missing or ambiguous; bounded read-only diagnostics may proceed on the requested environment, including remote contexts.
+- Perform necessary local builds and short-lived validation within the requested scope. Image pulls, task-specific test volumes, and loopback-bound test ports do not by themselves require another confirmation. Inspect mounts first; isolate validation from existing application data and stop temporary services after checking health, logs, and exit codes.
+- Require explicit authorization for container/network deletion, deleting any images or volumes, `compose down`, prune operations, registry login/push (including `buildx --push`), data-changing migrations, privileged operations, and state changes in remote, shared, staging, production, or cloud contexts. If the context is not clearly local, resolve it or obtain authorization before changing state.
+- An explicit request or prior approval covering the same target, operation, and effects satisfies that requirement. Reuse it; ask again only for a material change in scope or impact. Approval to stop services or run `down` does not authorize volume deletion with `down -v`.
+- Cleanup exception: after identifying the targets, remove temporary local containers and networks created solely for this task when they contain no data to retain. A task-specific local Compose project may be removed with `down` without `-v` after checking that all affected containers and networks meet this exception. Pre-existing resources, images, volumes, remote changes, and broad prune operations remain subject to the rule above.
+- When approval is missing, finish read-only diagnosis, authorized local file changes, and concrete command/impact preparation first. Pause only the dependent operation. If execution is blocked, complete other available checks and report the exact unverified behavior or unfinished operation; do not mark the whole task complete merely because a configuration file was written.
 
 ## Reporting
 

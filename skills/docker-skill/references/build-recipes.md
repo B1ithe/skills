@@ -78,10 +78,10 @@ Validation order:
 
 1. Run syntax/config checks such as `docker compose config`.
 2. Build images with `docker build` or `docker compose build`.
-3. Start short-lived validation with `docker compose up --build` only when appropriate for the host agent's confirmation and cleanup model.
+3. Start short-lived validation with `docker compose up --build` in an isolated local test project when runtime validation is needed; inspect mounts and port bindings before starting it.
 4. Check health endpoints, container logs, and exit codes when services start.
 
-If validation requires network pulls, long-running services, host port exposure, Docker volume writes, production contexts, or any action the host agent treats as privileged, request confirmation or clearly report that validation was not run.
+Apply [Authorization and Completion](../SKILL.md#authorization-and-completion) to validation and cleanup. Necessary local image pulls and isolated test resources are part of validation. If a required check is blocked by missing authorization or an unavailable environment, run the remaining checks and report that specific gap; do not silently substitute config validation for runtime verification.
 
 ## Universal Checks
 
@@ -243,7 +243,7 @@ Use BuildKit features when they solve a concrete build problem:
 - Use `--target <stage>` to debug or build a specific multi-stage target.
 - Use `--build-arg` only for non-secret build-time configuration.
 - Use `--platform` only for explicit cross-architecture needs, CI parity, or Apple Silicon/amd64 compatibility issues.
-- Treat `docker buildx build --push` and multi-architecture publishing as registry operations that require confirmation.
+- Treat `docker buildx build --push` and multi-architecture publishing as registry operations governed by [Authorization and Completion](../SKILL.md#authorization-and-completion).
 
 ## .dockerignore Patterns
 

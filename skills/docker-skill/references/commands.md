@@ -29,7 +29,7 @@ For any task against a running Docker environment, first identify:
 - Target project directory, Compose file, service, container ID/name, image, network, or volume.
 - Whether multiple plausible targets exist.
 
-Prefer Compose commands when the target is managed by Compose. If multiple candidates exist, list them and ask the user to choose before changing state.
+Prefer Compose commands when the target is managed by Compose. Resolve the target using the order in Target Selection below.
 
 ### 2. Keep operations bounded
 
@@ -42,9 +42,9 @@ Default to read-only diagnostics and bounded output:
 
 Use state-changing commands only with a clear target and reason. Prefer non-interactive `exec` and one-time commands that return output and exit.
 
-### 3. Confirm risky operations
+### 3. Apply authorization boundaries
 
-Ask for explicit confirmation before destructive, broad, publishing, or production-like operations, including container/image/volume deletion, `prune`, `compose down`, `compose down -v`, registry login/push, remote contexts, and migration commands that may change application data unless the user already requested that exact operation.
+Use [Authorization and Completion](../SKILL.md#authorization-and-completion) for approval requirements, existing authorization, temporary cleanup, and blocked work. The command lists below describe effects, not additional confirmation gates.
 
 ## Command Selection
 
@@ -72,7 +72,7 @@ Resolve the operation target in this order:
 3. Compose labels on the relevant running container.
 4. A candidate selected from `docker ps` or `docker compose ps`.
 
-If there are multiple plausible targets, list the candidates and ask the user to choose before changing state. Do not stop, restart, remove, exec into, or run migrations against a guessed target.
+If multiple plausible targets remain after checking the request, project files, and labels, list them and ask the user to choose before operating on one. Do not guess a target merely because it appears first in a listing.
 
 When the Compose file is known, prefer an explicit file argument such as:
 
@@ -97,7 +97,7 @@ Default allowed read-only or low-risk diagnostics:
 - `docker compose logs --tail <n>`
 - `docker compose config`
 
-State-changing operations require a clear target and reason:
+Operations that can change state require a clear target and a purpose within the request. Classify `exec` by the command it runs:
 
 - `docker start`, `stop`, `restart`
 - `docker compose up`, `stop`, `restart`
@@ -107,15 +107,7 @@ State-changing operations require a clear target and reason:
 - `docker compose build`
 - `docker cp`
 
-Ask for explicit confirmation before destructive, publishing, or broad operations:
-
-- `docker rm`, `docker rmi`
-- `docker volume rm`, `docker network rm`
-- `docker compose down`
-- `docker compose down -v`
-- `docker system prune`, `docker builder prune`, `docker image prune`, `docker volume prune`
-- `docker push`, registry login, `buildx build --push`
-- Operations against non-local, remote, production, staging, or cloud Docker contexts
+For destructive, publishing, privileged, or non-local operations, apply the authorization rules linked above, including their existing-approval and temporary-cleanup exceptions.
 
 ## Context Checks
 
@@ -126,7 +118,7 @@ docker context show
 docker context inspect <context>
 ```
 
-If the context is not clearly local, or its name/metadata suggests `prod`, `production`, `staging`, `remote`, a cloud provider, or a shared host, ask for confirmation before changing state. Read-only commands may be run first, but report the context used.
+Use the endpoint and metadata to establish whether the context is local, remote, or shared; names such as `prod`, `staging`, or `remote` are clues to investigate. Apply the authorization rules before changing state and report the context used. Read-only inspection does not require a separate context approval.
 
 ## Read-Only Diagnostics
 
@@ -162,7 +154,7 @@ docker compose restart <service>
 docker compose stop <service>
 ```
 
-Do not default to `docker compose down`. Prefer `stop` when the goal is only to stop services. Use `down` only when the user wants to tear down the project environment, recreate networks, or clear broken container state. Confirm separately before `down -v` because it removes volumes.
+Do not default to `docker compose down`. Prefer `stop` when the goal is only to stop services. Use `down` for authorized teardown or qualifying temporary cleanup. Volume deletion with `down -v` must be explicitly included in the authorization.
 
 Use profiles and one-time commands only for explicit goals:
 
@@ -172,7 +164,7 @@ docker compose run --rm <service> <command>
 docker compose up -d --scale <service>=<n>
 ```
 
-Migration or management commands may change application data. Explain the likely effect and confirm unless the user already explicitly requested that exact operation.
+For migration or management commands that change application data, identify the affected data and apply the authorization rules before execution.
 
 ## Container Operations
 
@@ -245,31 +237,18 @@ docker cp <container>:/path/in/container ./local-path
 docker cp ./local-path <container>:/path/in/container
 ```
 
-Copying out is appropriate for logs, generated artifacts, or config samples. Copying in is temporary debugging, not a durable fix, because containers are replaceable. Confirm paths before copying and avoid overwriting local files. Do not copy suspected secrets, database files, private keys, or large data sets unless the user explicitly asks and accepts the risk.
+Copying out is appropriate for logs, generated artifacts, or config samples. Copying in is temporary debugging, not a durable fix, because containers are replaceable. Verify source and destination paths through inspection; ask only if the destination or overwrite intent is unresolved. Avoid overwriting local files. Do not copy suspected secrets, database files, private keys, or large data sets unless the user explicitly asks and accepts the risk.
 
 ## Cleanup
 
-It is acceptable to remove temporary containers or Compose projects clearly created during the current task, after explaining the target. If ownership is unclear, ask first.
-
-Prefer:
+Check ownership and data-retention needs, then apply the temporary-cleanup exception in [Authorization and Completion](../SKILL.md#authorization-and-completion). Stop services when the task only calls for stopping them:
 
 ```bash
 docker compose stop
 docker stop <container>
 ```
 
-Confirm before:
-
-```bash
-docker rm <container>
-docker rmi <image>
-docker volume rm <volume>
-docker network rm <network>
-docker compose down
-docker compose down -v
-docker system prune
-docker builder prune
-```
+For qualifying temporary cleanup, target exact container/network IDs or the task-specific Compose project. Do not use broad prune commands as a shortcut. Report retained resources and any cleanup still awaiting approval.
 
 ## Reporting
 
