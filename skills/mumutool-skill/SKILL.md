@@ -24,9 +24,9 @@ Resolve bundled references against the same directory. Write generated artifacts
 ## Preflight
 
 1. Run `"$MUMUTOOL_SKILL_DIR/scripts/mumutool.sh" port`.
-2. Stop if the command cannot return a server port. MuMuPlayer must be installed and its control service available.
+2. If no server port is returned, pause port-dependent commands and follow Troubleshooting below. Resume when the control service is available; a failed first probe is not a reason to abandon the task.
 3. Run `"$MUMUTOOL_SKILL_DIR/scripts/mumutool.sh" info all`.
-4. Select the intended instance by `index`. Do not assume index `0` when multiple instances exist.
+4. Resolve the intended instance from the request and `info` output, then use its `index`. Ask only if multiple plausible targets remain; do not assume index `0`.
 5. Require `state: "running"` before app, shell, ADB, or UI operations. Open the instance first if the user requested an operation that needs Android running.
 6. Inspect both top-level `errcode` and nested `return.callback.errcode` when present.
 
@@ -56,9 +56,9 @@ MUMUTOOL_SKILL_DIR="/absolute/path/from-the-skill-locator"
 "$MUMUTOOL_SKILL_DIR/scripts/mumutool.sh" restart 0
 ```
 
-Targets accept one index (`0`), comma-separated indexes (`0,2`), or `all`. Use `all` only when the user explicitly asks for every instance.
+Targets accept one index (`0`), comma-separated indexes (`0,2`), or `all`. Read-only discovery such as `info all` may list every instance. State-changing operations using `all` require an explicit request covering every affected instance.
 
-After lifecycle changes, poll `info <index>` until the requested state appears. Do not send Android commands merely because the host process exists.
+After lifecycle changes, poll `info <index>` with a finite readiness deadline until the requested state appears. On timeout, inspect the reported state and explain the blocker; do not poll indefinitely or send Android commands merely because the host process exists.
 
 ## Manage apps
 
@@ -104,7 +104,7 @@ Raw `input text` is reliable mainly for ASCII. Do not promise correct Unicode or
 
 ## Safety rules
 
-- Treat `delete`, `move`, `import`, `config`, `uninstall_app`, destructive `run_cmd` calls, and bulk target `all` as state-changing operations. Execute them only when explicitly requested.
+- Execute `delete`, `move`, `import`, `config`, `uninstall_app`, destructive `run_cmd` calls, and mutations targeting `all` only when explicitly requested. Reuse an existing request or approval for the same target and effects; ask again only if the target, scope, or impact materially changes.
 - Never tap, swipe, or type without a current screenshot or hierarchy scan.
 - Prefer a specific instance index and package name.
 - Preserve user data. Export an instance before deletion when the user asks for a backup or preservation is otherwise in scope.
@@ -116,8 +116,12 @@ Raw `input text` is reliable mainly for ASCII. Do not promise correct Unicode or
 ## Troubleshooting
 
 - If `mumutool` is missing, verify MuMuPlayer for Mac is installed, or set `MUMUTOOL_PATH` to the executable.
-- If `port` fails, launch MuMuPlayer and retry.
+- If `port` fails, check the installed app and executable path. When the requested task requires its control service, launch the installed MuMuPlayer app and retry with a finite deadline. If recovery fails, report the missing dependency or service error and continue preparation that does not need the instance. Launching an installed app does not authorize installing or replacing MuMuPlayer.
 - If `info` shows a stopped instance, run `open <index>` only when required by the task, then poll readiness.
 - If ADB is unavailable, install Android platform tools or set `ADB` to its executable path.
 - If ADB is offline, retry `adb connect 127.0.0.1:<adb_port>` after the instance reaches `running`.
 - If a UI command has no visible effect, take a fresh screenshot, confirm orientation and physical screen size, then recalculate coordinates.
+
+## Completion
+
+Continue through the requested operation and verify its resulting state. Starting the app or connecting ADB is preparation, not completion of the user's task. Report the instance, observed outcome, and artifact paths; if blocked, distinguish completed preparation from the operation still pending.

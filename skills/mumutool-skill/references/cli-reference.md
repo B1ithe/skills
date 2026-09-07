@@ -200,8 +200,7 @@ MUMUTOOL_SKILL_DIR="/absolute/path/from-the-skill-locator"
 
 ## Failure handling
 
-- Missing executable: install MuMuPlayer for Mac or set `MUMUTOOL_PATH`.
-- `port` failure: launch MuMuPlayer; the local server is unavailable.
+- Missing executable or `port` failure: follow [Troubleshooting](../SKILL.md#troubleshooting) for path checks, task-required launch, and bounded recovery. Do not infer installation permission from a request to control an existing instance.
 - Missing `adb_port`: the instance is not ready.
 - ADB `offline`: wait for `state: running`, reconnect, then retry.
 - Top-level success but failed action: inspect `return.callback`.
