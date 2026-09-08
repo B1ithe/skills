@@ -36,6 +36,27 @@ _BUILTIN_NL: dict[str, bool | None] = {
     "request_id": False,
 }
 
+# For SSRF: whether a var can introduce '.' in a host/scheme position,
+# and whether it *must* contain '/' (path-like → skip host checks).
+_BUILTIN_DOT: dict[str, bool] = {
+    "uri": True,
+    "document_uri": True,
+    "request_uri": True,
+    "host": True,
+    "http_host": True,
+    "hostname": False,
+    "scheme": False,
+    "request_method": False,
+    "remote_addr": True,
+    "args": True,
+    "query_string": True,
+}
+_BUILTIN_MUST_SLASH: dict[str, bool] = {
+    "uri": True,
+    "document_uri": True,
+    "request_uri": True,
+}
+
 
 @dataclass
 class VarRef:
@@ -74,6 +95,32 @@ class NginxVarModel:
             return self.captures.get(name, False)
         return False
 
+    def can_contain(self, name: str, char: str) -> bool:
+        """Rough gixy-like can_contain for SSRF / injection checks."""
+        name = name.lstrip("$")
+        if char in ("\n", "\r"):
+            return self.may_contain_newline(name)
+        if char == ".":
+            if name.startswith("arg_") or name.startswith("http_") or name.startswith("cookie_"):
+                return True
+            if name in self.captures:
+                # Exclusive-class captures typically allow '.'
+                return True
+            if name.isdigit():
+                return self.captures.get(name, False)
+            if name in self.assignments:
+                return any(self.can_contain(dep, ".") for dep in self.assignments[name])
+            return _BUILTIN_DOT.get(name, False)
+        return False
+
+    def must_contain(self, name: str, char: str) -> bool:
+        name = name.lstrip("$")
+        if char == "/":
+            if name in self.assignments:
+                return any(self.must_contain(dep, "/") for dep in self.assignments[name])
+            return _BUILTIN_MUST_SLASH.get(name, False)
+        return False
+
     def script_may_contain_newline(self, script: str) -> bool:
         return any(self.may_contain_newline(v.name) for v in extract_vars(script))
 
@@ -99,9 +146,11 @@ _CHARCLASS_RE = re.compile(r"\[(\^?)(.*?)\]")
 
 
 def capture_may_contain_newline(pattern: str, group_name: str | int | None = None) -> bool:
-    """Heuristic: exclusive classes like [^/] can include \\n; '.' usually cannot."""
-    # Very small subset — enough for common location ~ patterns.
-    # If ^ is used with a class that does not exclude \n, treat as dangerous.
+    """Heuristic: exclusive classes like [^/] / \\W can include \\n; '.' usually cannot."""
+    # \\W = non-word = includes newline; \\D = non-digit = includes newline.
+    # \\S = non-space = excludes newline.
+    if re.search(r"\\[WD]", pattern):
+        return True
     for m in _CHARCLASS_RE.finditer(pattern):
         neg, body = m.group(1), m.group(2)
         if not neg:
@@ -132,11 +181,49 @@ def build_var_model_from_ast(root) -> NginxVarModel:
             args = node.args
             if len(args) >= 2 and args[0] in ("~", "~*"):
                 pattern = args[1]
-                # named groups
-                for nm in re.findall(r"\(\?<(\w+)>", pattern):
-                    model.captures[nm] = capture_may_contain_newline(pattern, nm)
-                # numbered groups: mark all as same heuristic if exclusive class present
-                if capture_may_contain_newline(pattern):
-                    for i in range(1, 10):
-                        model.captures.setdefault(str(i), True)
+                bodies = capturing_group_bodies(pattern)
+                for i, body in enumerate(bodies, 1):
+                    model.captures[str(i)] = capture_may_contain_newline(body)
+                # named groups (?<name>...) / (?P<name>...)
+                for m in re.finditer(r"\(\?<(\w+)>|\(\?P<(\w+)>", pattern):
+                    name = m.group(1) or m.group(2)
+                    # body starts after the name marker — approximate with full pattern heuristic
+                    model.captures[name] = capture_may_contain_newline(pattern)
+                # Refine named group bodies when we can pair with bodies list
+                for m in re.finditer(r"\(\?<(\w+)>([^)]*)\)|\(\?P<(\w+)>([^)]*)\)", pattern):
+                    name = m.group(1) or m.group(3)
+                    body = m.group(2) if m.group(1) else m.group(4)
+                    if name and body is not None:
+                        model.captures[name] = capture_may_contain_newline(body)
     return model
+
+
+def capturing_group_bodies(pattern: str) -> list[str]:
+    """Return inner text of each capturing group (skips (?:, (?=, etc.)."""
+    bodies: list[str] = []
+    i = 0
+    n = len(pattern)
+    while i < n:
+        if pattern[i] == "(" and (i == 0 or pattern[i - 1] != "\\"):
+            # non-capturing / lookaround
+            if pattern.startswith(("?:", "?=", "?!", "?<=", "?<!"), i + 1):
+                i += 1
+                continue
+            # named or plain capturing
+            j = i + 1
+            if pattern.startswith("?<", j) or pattern.startswith("?P<", j):
+                gt = pattern.find(">", j)
+                j = gt + 1 if gt != -1 else j
+            depth = 1
+            k = j
+            while k < n and depth:
+                if pattern[k] == "(" and pattern[k - 1] != "\\":
+                    depth += 1
+                elif pattern[k] == ")" and pattern[k - 1] != "\\":
+                    depth -= 1
+                k += 1
+            bodies.append(pattern[j : k - 1])
+            i = k
+            continue
+        i += 1
+    return bodies

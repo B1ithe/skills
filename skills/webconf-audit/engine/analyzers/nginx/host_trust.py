@@ -27,9 +27,10 @@ def analyze(root: Node, *, hop_id: str, **_kwargs) -> list[Signal]:
                     data={"header": header, "script": value},
                 )
             )
-        if value in ("$http_host", "${http_host}") or (
-            header.lower() == "host" and "$http_host" in value
-        ):
+        # gixy host_spoofing: Host $http_host or Host $arg_*
+        if header.lower() != "host":
+            continue
+        if value in ("$http_host", "${http_host}") or value.startswith("$arg_") or value.startswith("${arg_"):
             signals.append(
                 Signal(
                     id=SIG_HOST_FROM_CLIENT,

@@ -19,7 +19,9 @@ on the same engine.
 
 - **Parsers**: nginx + apache → JSON AST
 - **Engine (nginx)**: variables + analyzers/evaluators → Signals/Findings  
-  (first packs: `http_splitting`, `host_trust`)
+  (**gixy parity**: `http_splitting`, `host_spoofing`, `ssrf`, `origins`,
+  `add_header_redefinition`, `add_header_multiline`, `valid_referers`,
+  `alias_traversal`; plus `host_trust` for X-Forwarded-Host)
 - **Chain**: stub (e.g. prefix `proxy_pass` + Apache path confusion — next)
 
 See `references/design.md`.
@@ -54,6 +56,7 @@ python scripts/audit.py nginx /path/to/nginx.conf \
 ```bash
 python scripts/smoke_test.py
 python scripts/test_parser_ast.py
+python scripts/test_gixy_parity.py
 python scripts/corpus_validate.py
 # optional: rebuild fixtures/corpus from /tmp/webconf-corpus + /tmp/webconf-repos
 python scripts/corpus_rebuild.py && python scripts/corpus_validate.py

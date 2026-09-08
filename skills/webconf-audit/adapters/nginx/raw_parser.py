@@ -43,7 +43,8 @@ class NginxRawParser:
 
         keyword = Word(alphanums + "._-+/")
         value_wq = Regex(r"(?:\([^\s;]*\)|\$\{\w+\}|[^\s;{}])+")
-        value = QuotedString('"') | QuotedString("'") | value_wq
+        # multiline=True: real configs sometimes put CSP etc. across lines inside quotes
+        value = QuotedString('"', multiline=True) | QuotedString("'", multiline=True) | value_wq
 
         location_mod = Keyword("=") | Keyword("~*") | Keyword("~") | Keyword("^~")
         # Only these use key/value bodies (not nested nginx directives).

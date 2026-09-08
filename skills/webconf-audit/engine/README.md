@@ -4,11 +4,18 @@ Generic **config-defect rule engine** (not CRLF-specific):
 
 **Analyzers → Signals → Evaluators → Findings**, plus `chain/` for multi-hop.
 
-Rule packs live as analyzers/evaluators/chain modules (http_splitting, host_trust,
-path confusion, …). Adding a vulnerability class = adding a pack, not changing the runner.
+## Nginx rule packs (gixy parity)
 
-- `model.py` — Signal / Finding / HopResult / PipelineResult
-- `runner.py` — `audit_nginx_file`, `audit_pipeline`
-- `analyzers/<server>/` — emit Signals
-- `evaluators/<server>/` — Signals → Findings
-- `chain/` — cross-hop Findings
+| Pack | Finding id prefix | Notes |
+|------|-------------------|-------|
+| http_splitting | `nginx.http_splitting.*` | `$uri` / unsafe captures → sinks |
+| host_spoofing | `nginx.host_spoofing.*` | `Host $http_host` / `$arg_*` |
+| host_trust | `nginx.host_trust.*` | X-Forwarded-Host style (beyond gixy) |
+| ssrf | `nginx.ssrf.*` | controllable `proxy_pass` authority |
+| origins | `nginx.origins.*` | weak Referer/Origin regex |
+| add_header_redefinition | `nginx.add_header_redefinition.*` | nested `add_header` drops parents |
+| add_header_multiline | `nginx.add_header_multiline.*` | folded header values |
+| valid_referers | `nginx.valid_referers.*` | `none` in valid_referers |
+| alias_traversal | `nginx.alias_traversal.*` | alias + prefix location w/o `/` |
+
+Parity suite: `fixtures/gixy-simply/` + `scripts/test_gixy_parity.py`.

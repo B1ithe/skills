@@ -28,17 +28,25 @@ def evaluate(signals: list[Signal], *, hop_id: str) -> list[Finding]:
                 )
             )
         elif sig.id == ht.SIG_HOST_FROM_CLIENT:
+            script = (sig.data or {}).get("script") or ""
+            title = (
+                "Upstream Host header taken from client $http_host"
+                if "http_host" in script
+                else "Upstream Host header may be spoofed via request argument"
+            )
             findings.append(
                 Finding(
-                    id="nginx.host_trust.http_host",
+                    # gixy plugin name: host_spoofing; keep host_trust.* for prior reports
+                    id="nginx.host_spoofing.http_host",
                     severity="medium",
-                    title="Upstream Host header taken from client $http_host",
+                    title=title,
                     category="single_hop",
                     hop_ids=[hop_id],
                     based_on=[sig.id],
                     evidence=list(sig.evidence),
                     remediation=_REMEDIATION,
                     confidence=sig.confidence,
+                    summary=script or None,
                 )
             )
     return findings
