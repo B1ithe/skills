@@ -1,0 +1,8 @@
+# Default HTTP behavior profile for nginx hops (chain analysis).
+# Note: engine/behaviors.py currently uses a safe fallback if PyYAML is absent;
+# keep keys stable for future YAML loading.
+kind: nginx
+behaviors:
+  uri_normalize: true
+  framing: content_length_primary
+  upstream_keepalive: unknown

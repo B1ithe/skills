@@ -1,0 +1,6 @@
+# Default HTTP behavior profile for apache hops (used by future chain analysis).
+kind: apache
+behaviors:
+  uri_normalize: true
+  framing: unknown
+  upstream_keepalive: unknown
