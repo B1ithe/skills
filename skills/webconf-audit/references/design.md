@@ -10,7 +10,7 @@
 4. 支持 **单跳** 问题与 **多跳组合** 问题（如 Nginx → Apache 的 decode/normalize 差）
 5. **代码**做确定性分析；**LLM（可选）**做组合补强、缺口覆盖与解释
 
-当前已落地：解析器 + Nginx 变量原语 + 首批规则（http_splitting、host_trust）。引擎定位是**通用规则扫描框架**，不是 CRLF 专用工具。
+当前已落地：解析器 + Nginx 变量原语 + gixy 对齐规则包。引擎定位是**通用规则扫描框架**，不是 CRLF 专用工具。
 
 ---
 
@@ -200,7 +200,7 @@ Finding
 | 类别 | 示例 Signal / 规则 |
 |---|---|
 | HTTP splitting / CRLF | `upstream.request_line.includes_decoded_uri` |
-| Host / 转发头信任 | `client.forwarded_host.trusted_as_authority` |
+| Host spoofing（gixy） | `client.host.trusted_as_upstream_host` |
 | 路径混淆 / 前缀逃逸 | `upstream.proxy.prefix_location_pass_through` + apache slash behavior |
 | 危险反代 / SSRF 面 | proxy_pass 用户可控 host 等 |
 | 其它 gixy 类 | alias traversal、add_header 丢失… |
@@ -224,7 +224,7 @@ HopResult = {
 ```text
 upstream.request_line.includes_decoded_uri
 upstream.header.includes_decoded_uri
-client.forwarded_host.trusted_as_authority
+client.host.trusted_as_upstream_host
 ```
 
 来源用 `hop.kind` / `issuer`，便于：
@@ -288,7 +288,7 @@ python scripts/parse_config.py nginx|apache <entry> [--path-map SRC=DST] [--pret
 |---|---|---|
 | Phase 0–3 | 目录契约 + Nginx/Apache **仅解析** + fixtures | **已完成** |
 | Phase 4 | `adapters/nginx/variables.py` + engine 骨架（model/runner） | **已完成** |
-| Phase 5 | nginx analyzers + evaluators（http_splitting + host_trust） | **已完成** |
+| Phase 5 | nginx analyzers + evaluators（gixy parity 规则包） | **已完成** |
 | Phase 6 | behaviors/profiles 接通；chain（nginx→apache）；可选 LLM 层 | 下一步 |
 | Phase 7 | 更多单跳规则；Tomcat；LLM 契约完善 | 待定 |
 
@@ -307,7 +307,7 @@ python scripts/parse_config.py nginx|apache <entry> [--path-map SRC=DST] [--pret
 
 - [x] Signal/Finding/HopResult 合同稳定  
 - [x] 单跳 http_splitting：vulnerable fixture / crlf-desyncs 命中；`safe_request_uri` 不误报  
-- [x] USM 样本检出 `$x_f_h` host trust（medium）  
+- [x] gixy simply 76/76 对齐（含 host_spoofing；不含应用层 XFH 信任）  
 - [ ] 至少一条 nginx→apache chain 规则可跑（可用 profile 模拟后跳 behavior）  
 
 

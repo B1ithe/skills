@@ -14,10 +14,10 @@ from engine.analyzers.nginx import (
 )
 from engine.model import Signal
 
-# gixy plugin parity (plus host_trust extension for X-Forwarded-Host)
+# gixy plugin parity
 _ANALYZERS = (
     uri_injection,  # http_splitting
-    host_trust,  # host_spoofing (+ forwarded host)
+    host_trust,  # host_spoofing (Host $http_host / $arg_*)
     ssrf,
     origins,
     add_header_redefinition,

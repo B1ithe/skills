@@ -10,7 +10,6 @@ Generic **config-defect rule engine** (not CRLF-specific):
 |------|-------------------|-------|
 | http_splitting | `nginx.http_splitting.*` | `$uri` / unsafe captures → sinks |
 | host_spoofing | `nginx.host_spoofing.*` | `Host $http_host` / `$arg_*` |
-| host_trust | `nginx.host_trust.*` | X-Forwarded-Host style (beyond gixy) |
 | ssrf | `nginx.ssrf.*` | controllable `proxy_pass` authority |
 | origins | `nginx.origins.*` | weak Referer/Origin regex |
 | add_header_redefinition | `nginx.add_header_redefinition.*` | nested `add_header` drops parents |
