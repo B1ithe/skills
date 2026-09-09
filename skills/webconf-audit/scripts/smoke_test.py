@@ -74,12 +74,26 @@ def main() -> None:
         _fail("pipeline hop count")
     if d["hops"][0]["findings"] == []:
         _fail("pipeline should keep nginx hop findings")
-    # chain stub: top-level findings empty for now
-    if d["findings"] != []:
-        _fail(f"chain stub should be empty, got {d['findings']}")
+    # fixtures/nginx/minimal.conf uses $uri proxy_pass → no static HTTP upstream signal
+    if any(f["id"].startswith("chain.path_confusion") for f in d["findings"]):
+        _fail(f"unexpected path_confusion on minimal fixture: {d['findings']}")
     if len(d["all_findings"]) < 1:
         _fail("all_findings should include hop findings")
     _ok("pipeline shape")
+
+    # chain: any nginx HTTP reverse-proxy onto Apache → decode/normalize mismatch risk
+    chain = audit_pipeline(
+        [
+            {"kind": "nginx", "path": str(ROOT / "fixtures/nginx/path_confusion_front.conf")},
+            {"kind": "apache", "path": str(ROOT / "fixtures/apache/path_confusion_back.conf")},
+        ]
+    )
+    cf = [f for f in chain.findings if f.id == "chain.path_confusion.nginx_apache_decode_normalize"]
+    if not cf:
+        _fail(f"expected path_confusion chain finding, got {chain.findings}")
+    if len(cf[0].hop_ids) < 2:
+        _fail(f"path_confusion should reference both hops: {cf[0].hop_ids}")
+    _ok(f"path_confusion chain findings={len(cf)}")
 
     # optional external samples (set WEBCONF_SMOKE_NGINX / WEBCONF_SMOKE_NGINX_MAPPED)
     crlf = Path(os.environ["WEBCONF_SMOKE_NGINX"]) if os.environ.get("WEBCONF_SMOKE_NGINX") else None

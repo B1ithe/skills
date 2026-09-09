@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pyparsing import ParseException, ParseResults
+from pyparsing import ParseException, ParseResults, lineno
 
 from adapters.base import ParseResult
 from adapters.common.model import ConfigDocument, Node, block, comment, directive, include
@@ -10,6 +10,26 @@ from adapters.common.pathmap import resolve_include_pattern
 from adapters.nginx.raw_parser import NginxRawParser
 
 _HASH_LIKE = frozenset({"map", "types", "charset_map", "geo", "split_clients"})
+
+
+def _line_at(loc: int | None, source: str) -> int | None:
+    if loc is None or not source:
+        return None
+    # Located may start on skipped whitespace/newline; advance to content.
+    i = loc
+    n = len(source)
+    while i < n and source[i] in " \t\r\n":
+        i += 1
+    if i >= n:
+        i = min(loc, n - 1)
+    return lineno(i, source)
+
+
+def _unwrap_located(item: ParseResults, source: str) -> tuple[ParseResults, int | None]:
+    """Return (inner named results, 1-based line) from a Located-wrapped Group item."""
+    if "locn_start" in item and "value" in item:
+        return item["value"], _line_at(item["locn_start"], source)
+    return item, None
 
 
 class NginxAdapter:
@@ -26,6 +46,7 @@ class NginxAdapter:
             parsed,
             root,
             file=path_info,
+            source=text,
             warnings=warnings,
             path_map=None,
             expand_includes=False,
@@ -78,6 +99,7 @@ class NginxAdapter:
             parsed,
             parent,
             file=str(path),
+            source=text,
             warnings=warnings,
             path_map=path_map,
             expand_includes=True,
@@ -91,6 +113,7 @@ class NginxAdapter:
         parent: Node,
         *,
         file: str,
+        source: str,
         warnings: list[str],
         path_map: dict[str, str] | None,
         expand_includes: bool,
@@ -98,13 +121,14 @@ class NginxAdapter:
         seen: set[str] | None = None,
     ) -> None:
         for item in parsed:
-            name = item.get_name()
+            inner, line = _unwrap_located(item, source)
+            name = inner.get_name()
             if name == "comment":
-                parent.children.append(comment(str(item[0]), file=file))
+                parent.children.append(comment(str(inner[0]), file=file, line=line))
                 continue
             if name == "include":
-                inc_path = str(item[1])
-                node = include(inc_path, file=file)
+                inc_path = str(inner[1])
+                node = include(inc_path, file=file, line=line)
                 parent.children.append(node)
                 if expand_includes and current_file is not None and seen is not None:
                     matches = resolve_include_pattern(
@@ -113,7 +137,7 @@ class NginxAdapter:
                     if not matches:
                         warnings.append(f"include not found: {inc_path} (from {current_file})")
                     for match in matches:
-                        child_root = block("included", args=[str(match)], file=str(match))
+                        child_root = block("included", args=[str(match)], file=str(match), line=1)
                         node.children.append(child_root)
                         self._parse_file_into(
                             match,
@@ -124,22 +148,23 @@ class NginxAdapter:
                         )
                 continue
             if name == "directive":
-                toks = [str(x) for x in item]
-                parent.children.append(directive(toks[0], toks[1:], file=file))
+                toks = [str(x) for x in inner]
+                parent.children.append(directive(toks[0], toks[1:], file=file, line=line))
                 continue
             if name == "block":
-                keyword = str(item[0])
-                args = [str(x) for x in item[1]]
-                body = item[2]
-                node = block(keyword, args, file=file)
+                keyword = str(inner[0])
+                args = [str(x) for x in inner[1]]
+                body = inner[2]
+                node = block(keyword, args, file=file, line=line)
                 if keyword in _HASH_LIKE:
                     node.meta["hash_like"] = True
-                    self._fill_hash_body(body, node, file=file, warnings=warnings)
+                    self._fill_hash_body(body, node, file=file, source=source, warnings=warnings)
                 elif len(body):
                     self._fill(
                         body,
                         node,
                         file=file,
+                        source=source,
                         warnings=warnings,
                         path_map=path_map,
                         expand_includes=expand_includes,
@@ -149,34 +174,33 @@ class NginxAdapter:
                 parent.children.append(node)
                 continue
             if name == "hash_value":
-                # Defensive: hash entries should normally be handled in _fill_hash_body.
-                self._append_map_entry([str(x) for x in item], parent, file=file)
+                self._append_map_entry([str(x) for x in inner], parent, file=file, line=line)
                 continue
             warnings.append(f"unrecognized parse node in {file}: {name}")
 
-    def _append_map_entry(self, hv_args: list[str], parent: Node, *, file: str) -> None:
+    def _append_map_entry(
+        self, hv_args: list[str], parent: Node, *, file: str, line: int | None = None
+    ) -> None:
         if not hv_args:
             return
-        # Empty quoted keys ('' / "") are valid map matchers; keep them visible.
         key = hv_args[0] if hv_args[0] != "" else '""'
         parent.children.append(
-            Node(kind="map_entry", name=key, args=list(hv_args[1:]), file=file)
+            Node(kind="map_entry", name=key, args=list(hv_args[1:]), file=file, line=line)
         )
 
-    def _fill_hash_body(self, body: ParseResults, parent: Node, *, file: str, warnings: list[str]) -> None:
+    def _fill_hash_body(
+        self, body: ParseResults, parent: Node, *, file: str, source: str, warnings: list[str]
+    ) -> None:
         for hv in body:
             if not isinstance(hv, ParseResults):
                 warnings.append(f"unexpected map/types entry in {file}")
                 continue
-            name = hv.get_name()
+            inner, line = _unwrap_located(hv, source)
+            name = inner.get_name()
             if name == "comment":
-                parent.children.append(comment(str(hv[0]), file=file))
+                parent.children.append(comment(str(inner[0]), file=file, line=line))
                 continue
-            # Group(comment) wraps a comment ParseResults — detect nested comment.
-            if len(hv) == 1 and isinstance(hv[0], ParseResults) and hv[0].get_name() == "comment":
-                parent.children.append(comment(str(hv[0][0]), file=file))
-                continue
-            if name == "hash_value" or name is None:
-                self._append_map_entry([str(x) for x in hv], parent, file=file)
+            if name == "hash_value":
+                self._append_map_entry([str(x) for x in inner], parent, file=file, line=line)
                 continue
             warnings.append(f"unexpected map/types entry kind {name!r} in {file}")

@@ -1,6 +1,8 @@
-# Default HTTP behavior profile for apache hops (used by future chain analysis).
+# Default HTTP behavior profile for apache hops (chain analysis).
 kind: apache
 behaviors:
   uri_normalize: true
+  merge_slashes: true
+  encoded_slash_handling: decode_or_reject
   framing: unknown
   upstream_keepalive: unknown

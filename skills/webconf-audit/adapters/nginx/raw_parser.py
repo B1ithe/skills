@@ -9,6 +9,7 @@ from pyparsing import (
     Group,
     Keyword,
     Literal,
+    Located,
     OneOrMore,
     Optional,
     ParseResults,
@@ -22,7 +23,6 @@ from pyparsing import (
 )
 
 # Rely on pyparsing's default whitespace skipping between tokens.
-# Do NOT also require explicit White() before values (that double-eats spaces).
 ParserElement.set_default_whitespace_chars(" \t\r\n")
 
 
@@ -30,10 +30,10 @@ class NginxRawParser:
     """pyparsing grammar for an nginx conf subset used in security audits."""
 
     def parse(self, text: str) -> ParseResults:
-        content = text.strip()
-        if not content:
+        # Keep original text (no strip) so Located offsets map to real line numbers.
+        if not text or not text.strip():
             return ParseResults([])
-        return self.grammar.parse_string(content, parse_all=True)
+        return self.grammar.parse_string(text, parse_all=True)
 
     @cached_property
     def grammar(self):
@@ -43,11 +43,9 @@ class NginxRawParser:
 
         keyword = Word(alphanums + "._-+/")
         value_wq = Regex(r"(?:\([^\s;]*\)|\$\{\w+\}|[^\s;{}])+")
-        # multiline=True: real configs sometimes put CSP etc. across lines inside quotes
         value = QuotedString('"', multiline=True) | QuotedString("'", multiline=True) | value_wq
 
         location_mod = Keyword("=") | Keyword("~*") | Keyword("~") | Keyword("^~")
-        # Only these use key/value bodies (not nested nginx directives).
         hash_kw = (
             Keyword("map")
             | Keyword("types")
@@ -79,9 +77,11 @@ class NginxRawParser:
         location_block = Forward()
         hash_block = Forward()
 
-        sub = OneOrMore(
-            Group(comment | include | directive | if_block | location_block | hash_block | generic_block)
+        # Located → locn_start / value / locn_end for line mapping in the adapter.
+        stmt = Located(
+            comment | include | directive | if_block | location_block | hash_block | generic_block
         )
+        sub = OneOrMore(Group(stmt))
 
         if_block <<= (Keyword("if") + Group(condition) + Group(left + Optional(sub) + right))("block")
 
@@ -92,9 +92,8 @@ class NginxRawParser:
             + Group(left + Optional(sub) + right)
         )("block")
 
-        # types/map bodies: entries or comments (comments are common inside types {}).
-        hash_value = Group(value + ZeroOrMore(value) + semi)("hash_value")
-        hash_body = ZeroOrMore(Group(comment) | hash_value)
+        hash_value = (value + ZeroOrMore(value) + semi)("hash_value")
+        hash_body = ZeroOrMore(Group(Located(comment | hash_value)))
         hash_block <<= (
             hash_kw
             + Group(ZeroOrMore(value))

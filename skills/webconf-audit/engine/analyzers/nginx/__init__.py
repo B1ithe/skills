@@ -8,13 +8,14 @@ from engine.analyzers.nginx import (
     alias_traversal,
     host_trust,
     origins,
+    proxy_prefix,
     ssrf,
     uri_injection,
     valid_referers,
 )
 from engine.model import Signal
 
-# gixy plugin parity
+# gixy plugin parity + chain precursor signals
 _ANALYZERS = (
     uri_injection,  # http_splitting
     host_trust,  # host_spoofing (Host $http_host / $arg_*)
@@ -24,6 +25,7 @@ _ANALYZERS = (
     add_header_multiline,
     valid_referers,
     alias_traversal,
+    proxy_prefix,  # HTTP reverse-proxy targets (for nginx→apache chain)
 )
 
 

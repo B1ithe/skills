@@ -138,7 +138,21 @@ Hop
   # signals, findings, behaviors
 ```
 
-拓扑来源：用户显式声明 > 部署推断 > 默认单 hop。
+拓扑来源与协作（多上游 fan-out）：
+
+1. 从 edge AST 抽出候选上游（`proxy_pass` / `upstream` / `location`）
+2. Agent 能解析到 conf + 类型 → 直接作为 origin hop 分析，并按 **route** 跑 chain
+3. 解析不出 → **询问用户**提供该上游 conf（及种类）
+4. 用户不提供 → **跳过该 route 的 chain**，不影响 edge 单跳 findings
+
+不要把「一台 nginx 后面多台不同服务器」压成单一线性 `nginx→apache`；
+模型是 **1 个 edge + N 个 origin + 若干 route**。拓扑优先级：
+用户显式声明 > agent 从配置推断 > 默认仅单 hop。
+
+include 的 `path-map` 必须按 **hop** 隔离：两台 nginx（前后端）各自前缀不同时，
+用 `--hop front=nginx:...` / `--hop back=nginx:...`，再用
+`--hop-path-map front:SRC=DST` / `--hop-path-map back:SRC=DST`。
+仅按 kind（`nginx:`）绑 map 无法区分同 kind 的多个 hop。
 
 ### 5.2 Signal（原「facts」，属引擎）
 
@@ -201,7 +215,7 @@ Finding
 |---|---|
 | HTTP splitting / CRLF | `upstream.request_line.includes_decoded_uri` |
 | Host spoofing（gixy） | `client.host.trusted_as_upstream_host` |
-| 路径混淆 / 前缀逃逸 | `upstream.proxy.prefix_location_pass_through` + apache slash behavior |
+| 路径混淆（nginx→apache） | nginx `proxy_pass`→Apache：decode-then-normalize vs normalize-first（`%2f`） |
 | 危险反代 / SSRF 面 | proxy_pass 用户可控 host 等 |
 | 其它 gixy 类 | alias traversal、add_header 丢失… |
 
@@ -264,6 +278,9 @@ apache.allowoverride.all_in_directory
 LLM 只消费 **PipelineResult / hop_bundle**（摘要 + signals + behaviors + 热片段）。  
 **不得无证据覆盖代码 high Finding。**
 
+Finding 可带 `affected_versions`（组件 + 版本范围 + 说明）。  
+**代码只输出影响范围，不根据实装版本过滤告警**；由 agent 对照真实版本（或询问用户）判断该条在本次环境是否成立 / 如何降级表述。
+
 ---
 
 ## 9. 解析器（已定且部分已实现）
@@ -308,7 +325,7 @@ python scripts/parse_config.py nginx|apache <entry> [--path-map SRC=DST] [--pret
 - [x] Signal/Finding/HopResult 合同稳定  
 - [x] 单跳 http_splitting：vulnerable fixture / crlf-desyncs 命中；`safe_request_uri` 不误报  
 - [x] gixy simply 76/76 对齐（含 host_spoofing；不含应用层 XFH 信任）  
-- [ ] 至少一条 nginx→apache chain 规则可跑（可用 profile 模拟后跳 behavior）  
+- [x] 至少一条 nginx→apache chain 规则可跑：`chain.path_confusion.nginx_apache_decode_normalize`  
 
 
 ---

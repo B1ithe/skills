@@ -16,10 +16,13 @@ _DEFAULTS: dict[str, dict[str, Any]] = {
         "upstream_keepalive": "unknown",
     },
     "apache": {
+        # Apache typically merges // and may decode %2f depending on AllowEncodedSlashes.
         "uri_normalize": True,
+        "merge_slashes": True,
         "framing": "unknown",
         "upstream_keepalive": "unknown",
-        "encoded_slash_handling": "unknown",
+        "encoded_slash_handling": "decode_or_reject",
+        "listen_addrs": [],
     },
 }
 
@@ -83,8 +86,33 @@ def infer_nginx_behaviors(root: Node) -> dict[str, Any]:
     return out
 
 
+def infer_apache_behaviors(root: Node) -> dict[str, Any]:
+    """Extract Listen addresses for matching nginx proxy_pass targets."""
+    addrs: list[str] = []
+    for node in root.walk():
+        if node.kind != "directive" or node.name.lower() != "listen" or not node.args:
+            continue
+        raw = node.args[0]
+        # Listen 127.0.0.1:60080  |  Listen 80  |  Listen [::]:443
+        if ":" in raw and not raw.startswith("["):
+            addrs.append(raw)
+        elif raw.isdigit():
+            addrs.append(f"0.0.0.0:{raw}")
+            addrs.append(f"127.0.0.1:{raw}")
+        else:
+            addrs.append(raw)
+    out: dict[str, Any] = {}
+    if addrs:
+        out["listen_addrs"] = sorted(set(addrs))
+    return out
+
+
 def merge_behaviors(kind: str, root: Node | None = None) -> dict[str, Any]:
     base = dict(load_profile(kind).get("behaviors") or {})
-    if kind == "nginx" and root is not None:
+    if root is None:
+        return base
+    if kind == "nginx":
         base.update(infer_nginx_behaviors(root))
+    elif kind in ("apache", "httpd"):
+        base.update(infer_apache_behaviors(root))
     return base

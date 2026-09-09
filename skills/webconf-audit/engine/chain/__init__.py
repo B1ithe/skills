@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-"""Chain evaluators: combine HopResults into cross-hop Findings.
+"""Chain evaluators: combine HopResults into cross-hop Findings."""
 
-Phase 6 will add real nginx→apache rules. For now we provide a stub that
-returns no findings but keeps the runner contract stable.
-"""
-
+from engine.chain import path_confusion
 from engine.model import Finding, HopResult
+
+_CHAIN = (path_confusion,)
 
 
 def run_all(hops: list[HopResult]) -> list[Finding]:
-    # Placeholder: no chain rules yet.
-    return []
+    out: list[Finding] = []
+    for mod in _CHAIN:
+        out.extend(mod.evaluate(hops))
+    return out

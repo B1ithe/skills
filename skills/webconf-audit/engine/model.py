@@ -53,9 +53,12 @@ class Finding:
     remediation: str | None = None
     confidence: str = "high"
     summary: str | None = None
+    # Version coverage for version-scoped defects, e.g.
+    # [{"component": "apache", "versions": ">=2.4.49", "note": "..."}]
+    affected_versions: list[dict[str, str]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "id": self.id,
             "severity": self.severity,
             "title": self.title,
@@ -67,6 +70,9 @@ class Finding:
             "confidence": self.confidence,
             "summary": self.summary,
         }
+        if self.affected_versions:
+            d["affected_versions"] = [dict(x) for x in self.affected_versions]
+        return d
 
 
 @dataclass
